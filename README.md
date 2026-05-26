@@ -64,6 +64,12 @@ make test 2>/dev/null || echo "No test target"
 ---
 
 ## 4. Production Observability & Telemetry
+
+#### Local Observability Diagnostics
+*   **Prometheus Scrape Endpoint:** `http://localhost:2112/metrics` (Default Prometheus exposition format)
+*   **OTel Collector Target:** `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP/JSON)
+*   **Health & Readiness SLO Probe:** `GET http://localhost:8080/healthz` or `GET http://localhost:8080/readyz`
+
 High reliability requires comprehensive, zero-bias monitoring. This repository incorporates standard OTel metrics and tracing:
 *   **Metrics Scraper:** Exposes Prometheus scrape metrics tracking `Sandbox startup times, task routing times, policy verification success rates`.
 *   **Tracing Engine:** Injects standard OpenTelemetry propagation headers across downstream boundaries.
@@ -85,6 +91,18 @@ We enforce deterministic rollback guidelines tailored to each component's state 
 ---
 
 ## 6. Secure SDLC & Least Privilege
+
+#### OIDC Pipeline Authentication
+This repository authenticates to cloud infrastructure using passwordless OpenID Connect (OIDC) tokens.
+*   **Audience Mapping:** `https://github.com/Mindburn-Labs`
+*   **Required GitHub Workflow Scopes:**
+    ```yaml
+    permissions:
+      id-token: write   # Required for requesting the JWT OIDC token
+      contents: read    # Required for checkout
+    ```
+*   **Target Cloud IAM Role Variable:** `${{ secrets.GH_ACTIONS_OIDC_ROLE_ARN }}`
+
 *   **OIDC Token Federation:** Direct, passwordless OpenID Connect federation is used for container publishing and cloud deployments.
 *   **Zero Static Keys:** Storing long-lived cloud credentials or environment tokens in repository variables is **strictly forbidden**. All secrets must route dynamically through secure cloud brokers or HashiCorp Vault.
 *   **Automated Updates:** Dependabot / Renovate scans execute monthly to bump minor and patch variations, eliminating package drift.
