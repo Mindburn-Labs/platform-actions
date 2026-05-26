@@ -1,0 +1,11 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: platform-actions
+  description: "Central platform-actions configuration and automation."
+  annotations:
+    mindburn.org/project-tier: platform
+spec:
+  type: library
+  lifecycle: production
+  owner: architecture-platform
