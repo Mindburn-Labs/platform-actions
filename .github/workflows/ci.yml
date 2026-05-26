@@ -1,4 +1,6 @@
 name: Continuous Integration
+permissions:
+  contents: read
 
 on:
   push:
@@ -8,4 +10,4 @@ on:
 
 jobs:
   preflight-checks:
-    uses: mindburn-labs/platform-actions/.github/workflows/agent-preflight.yml@c21903fbf6f885c826c69a736229b1a8415e30c1
+    uses: ./.github/workflows/agent-preflight.yml

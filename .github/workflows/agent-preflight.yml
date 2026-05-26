@@ -1,48 +1,103 @@
 name: AI Agent Review & Preflight
 
 on:
+  workflow_call:
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   agent-preflight:
+    name: Agent contract and focused gates
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Codebase
-        uses: actions/checkout@11bd71901bbe5b16309077582c58c8d28c3a0f6d
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
 
+      - name: Detect repository toolchains
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -f go.mod ]] && echo "go=true" >> "$GITHUB_OUTPUT" || echo "go=false" >> "$GITHUB_OUTPUT"
+          [[ -f package.json ]] && echo "node=true" >> "$GITHUB_OUTPUT" || echo "node=false" >> "$GITHUB_OUTPUT"
+          [[ -f pyproject.toml || -f requirements.txt ]] && echo "python=true" >> "$GITHUB_OUTPUT" || echo "python=false" >> "$GITHUB_OUTPUT"
+          [[ -f Cargo.toml ]] && echo "rust=true" >> "$GITHUB_OUTPUT" || echo "rust=false" >> "$GITHUB_OUTPUT"
+          [[ -f pubspec.yaml ]] && echo "flutter=true" >> "$GITHUB_OUTPUT" || echo "flutter=false" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
-        uses: actions/setup-go@f111f3307d8850f50100008915657158a13e9a8f
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00
         with:
-          go-version: '1.25.10'
+          go-version-file: go.mod
 
-      - name: Generate CodeGraph Index
-        run: |
-          echo ">>> Bootstrapping platform-agent-substrate CodeGraph Indexer..."
-          # Mock CodeGraph index creation (git-ignored index.json generated dynamically by bootstrap)
-          mkdir -p .codegraph
-          echo '{"version":"1.0","nodes":[],"edges":[]}' > .codegraph/index.json
-          echo "✅ CodeGraph index generated successfully inside geofence boundary."
+      - name: Set up Node.js
+        if: steps.detect.outputs.node == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
 
-      - name: Verify Agent YAML Rules
+      - name: Set up Python
+        if: steps.detect.outputs.python == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Verify CodeGraph hygiene
+        shell: bash
         run: |
-          echo ">>> Validating agent.yaml execution boundaries..."
-          if [ -f "agent.yaml" ]; then
-            # Validate agent.yaml has mandatory sections
-            grep -q "agent:" agent.yaml
-            grep -q "allowed_roles:" agent.yaml
-            echo "✅ agent.yaml configuration is structurally valid."
+          set -euo pipefail
+          if git ls-files | grep -q '^\.codegraph/'; then
+            echo "::error::.codegraph/ must not be committed"
+            exit 1
+          fi
+          if command -v codegraph >/dev/null 2>&1; then
+            codegraph init -i
           else
-            echo "⚠️ No agent.yaml found in repository root. Skipping..."
+            echo "::notice::codegraph CLI is unavailable on this runner; committed .codegraph hygiene was still checked"
           fi
 
-      - name: Run Conformance Preflight Sweeps
+      - name: Validate agent.yaml contract
+        shell: bash
         run: |
-          echo ">>> Dispatching conformance-engineer preflight sweeps..."
-          # Run preflight verification checks
-          make test || echo "No Makefile test targets found. Skipping..."
-          echo "✅ Agent preflight reviews completed successfully!"
+          set -euo pipefail
+          if [[ ! -f agent.yaml ]]; then
+            echo "::error::agent.yaml is required for agent-native repositories"
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path("agent.yaml").read_text(encoding="utf-8")
+          required = ["repo_type:", "owners:", "commands:", "risk:", "agent_entrypoints:"]
+          missing = [key[:-1] for key in required if key not in text]
+          if missing:
+              raise SystemExit(f"agent.yaml missing canonical keys: {', '.join(missing)}")
+          PY
+
+      - name: Run focused repository gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f Makefile ]]; then
+            echo "::error::Makefile is required to expose setup/lint/test/build gates"
+            exit 1
+          fi
+
+          has_target() {
+            make -qp 2>/dev/null | awk -F: '/^[A-Za-z0-9_.-]+:([^=]|$)/ {print $1}' | grep -qx "$1"
+          }
+
+          for target in setup lint test build; do
+            if has_target "$target"; then
+              make "$target"
+            else
+              echo "::notice::No Makefile target '$target' in this repository"
+            fi
+          done
