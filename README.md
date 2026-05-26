@@ -16,6 +16,21 @@ Aggregates centralized continuous integration scripts, OPA policies, OTel config
 
 ---
 
+
+
+### 1.1 System Topology & Data Flow
+```mermaid
+graph TD
+    %% Styling and Colors
+    classDef box fill:#3b0764,stroke:#d8b4fe,stroke-width:2px,color:#f8fafc;
+
+    Dev["Developer / Agent"] -->|1. Request Workspace| Sandbox["platform-actions"]
+    Sandbox -->|2. Retrieve Tools| MCP["platform-mcp-registry"]
+    Sandbox -->|3. Validate Policy| Policies["platform-policies"]
+    Sandbox -->|4. Execute Commands| Workspace["Isolated Worktree Enclave"]
+
+    class Dev,Sandbox,MCP,Policies,Workspace box;
+```
 ## 2. Directory Layout & Key Components
 Below is the verified structural topology of the repository:
 ```text
