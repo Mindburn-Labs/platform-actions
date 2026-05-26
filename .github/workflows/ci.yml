@@ -1,0 +1,11 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  preflight-checks:
+    uses: mindburn-labs/platform-actions/.github/workflows/agent-preflight.yml@main

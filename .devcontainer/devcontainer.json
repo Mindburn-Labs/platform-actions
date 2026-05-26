@@ -1,0 +1,7 @@
+{
+  "name": "platform-actions Development Sandbox",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {}
+  }
+}
