@@ -4,7 +4,7 @@ metadata:
   name: platform-actions
   description: "Central platform-actions configuration and automation."
   annotations:
-    mindburn.org/project-tier: platform
+    app-mindburn-web.org/project-tier: platform
 spec:
   type: library
   lifecycle: production

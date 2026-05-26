@@ -1,0 +1,51 @@
+name: Production Readiness Gate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  production-readiness:
+    name: Production readiness validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Run repository gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f Makefile ]]; then
+            make lint
+            make test
+            make build
+          else
+            echo "::error::Makefile is required for production readiness"
+            exit 1
+          fi
+
+      - name: Run release manifest gate when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f scripts/validate-release-manifest.rb && -f manifests/release-candidate.yaml ]]; then
+            ruby scripts/validate-release-manifest.rb manifests/release-candidate.yaml
+          else
+            echo "::notice::No release manifest gate in this repository"
+          fi
+
+      - name: Run GitOps environment gate when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f scripts/validate-gitops-environments.rb && -d environments ]]; then
+            ruby scripts/validate-gitops-environments.rb environments
+          else
+            echo "::notice::No GitOps environment gate in this repository"
+          fi

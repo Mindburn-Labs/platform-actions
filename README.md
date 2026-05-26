@@ -103,6 +103,10 @@ We enforce deterministic rollback guidelines tailored to each component's state 
     2.  Check K8s deployment statuses or tag deployments inside Argo CD in the GitOps control plane.
     3.  If stateful migration rollback is blocked, initiate the approved **Forward-Fix** pipeline rather than attempting destructive data reversals.
 
+## 5.1 Production Readiness Gate
+
+`platform-actions/.github/workflows/production-readiness.yml` is the reusable pre-promotion gate for deployable repositories. It runs repository `make` gates and, when present, the release-manifest and GitOps environment validators. This workflow does not deploy; it blocks promotion until a repository can prove its local gates, immutable release evidence, and disabled production sync posture.
+
 ---
 
 ## 6. Secure SDLC & Least Privilege
