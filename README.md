@@ -1,7 +1,7 @@
 # platform-actions
 
 > [!WARNING]
-> **Ecosystem Boundary**: This repository is classified strictly as a **Non-HELM system**. It is decoupled from the HELM cryptographic verification core and serves Pilot or Titan product layers.
+> **Ecosystem Boundary**: This repository is classified strictly as a **Non-HELM system**. It is decoupled from the HELM cryptographic verification core and serves non-HELM product layers.
 
 ## 1. System Overview & Purpose
 `platform-actions` is a production-grade component of **Mindburn Labs** representing a dedicated layer inside our sovereign microservice architecture.
