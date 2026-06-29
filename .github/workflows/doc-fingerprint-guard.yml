@@ -1,0 +1,42 @@
+name: Doc Fingerprint Guard
+
+# Anti-regrowth gate for the 2026-06-29 markdown estate cleanup.
+# Fails if any tracked Markdown reintroduces the fabricated-README template
+# fingerprints or the corrupted app-mindburn-web.org domain. Reusable:
+# other repos can call this via `uses: Mindburn-Labs/platform-actions/.github/workflows/doc-fingerprint-guard.yml@main`.
+
+on:
+  workflow_call:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  doc-fingerprint-guard:
+    name: Reject fabricated-template / corrupted-doc fingerprints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Scan Markdown for banned fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          # High-specificity strings unique to the fabricated-template / domain corruption.
+          # These never appear in legitimate Mindburn docs; a hit means regrowth.
+          patterns='app-mindburn-web\.org|svc-titan-proofd|Rollback Class R[0-9]|sovereign microservice|HELM Notary'
+          hits="$(grep -rnE "$patterns" --include='*.md' . \
+            | grep -v -e '/node_modules/' -e '/.git/' -e '/vendor/' -e '/.codex-security-scan/' || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::Banned doc fingerprint(s) found — fabricated-template or corrupted-domain regrowth. Fix before merge:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "OK: no banned doc fingerprints."
