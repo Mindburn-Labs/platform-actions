@@ -1,133 +1,69 @@
 # platform-actions
 
-> [!WARNING]
-> **Ecosystem Boundary**: This repository is classified strictly as a **Non-HELM system**. It is decoupled from the HELM cryptographic verification core and serves non-HELM product layers.
+> [!NOTE]
+> **Ecosystem boundary**: This repository is a **Non-HELM** system. It carries no HELM cryptographic verification core and makes no governance or receipt claims. It hosts reusable CI plumbing for the Mindburn Labs polyrepo estate.
 
-## 1. System Overview & Purpose
-`platform-actions` is a production-grade component of **Mindburn Labs** representing a dedicated layer inside our sovereign microservice architecture.
+Reusable GitHub Actions workflows shared across Mindburn Labs repositories. Each
+consuming repo calls these via `uses:` / `workflow_call` so CI logic lives in one
+place. The workflows are toolchain-agnostic: they auto-detect Go / Node / Python /
+Rust / Flutter and run whatever `make` gates the consuming repo exposes.
 
-Aggregates centralized continuous integration scripts, OPA policies, OTel configurations, sandbox execution substrates, and tool catalogs for developers and AI agents.
+## Reusable workflow catalog
 
-### Technical Taxonomy: **PlatformOps & Agent Substrate**
-*   **Language Stack:** Text
-*   **Build & CodeGen Toolchain:** Static Manifests
-*   **Containerization:** N/A
-*   **Security Baseline:** Enforced (Push Protection, Dependabot Monthly Sweeps, Vulnerability Alerts)
+| Workflow | Trigger | Purpose |
+| --- | --- | --- |
+| `.github/workflows/agent-preflight.yml` | `workflow_call`, `pull_request`, `workflow_dispatch` | Agent-native preflight: detect toolchains and set up the matching runtime; assert `.codegraph/` is not committed and (re)init CodeGraph when the CLI is present; validate the `agent.yaml` contract has its canonical keys; run the consuming repo's `setup`/`lint`/`test`/`build` Make targets when they exist. |
+| `.github/workflows/ci.yml` | `push` / `pull_request` on `main` | Thin entry point — reuses `agent-preflight.yml` so a repo gets the full preflight by referencing one workflow. |
+| `.github/workflows/production-readiness.yml` | `workflow_call`, `workflow_dispatch` | Pre-promotion gate for deployable repos. Runs `make lint`/`test`/`build`, and, when present, a release-manifest validator (`scripts/validate-release-manifest.rb`) and a GitOps environment validator (`scripts/validate-gitops-environments.rb`). It does not deploy. |
 
----
+### Consuming a workflow
 
+From another repository's `.github/workflows/`:
 
-
-### 1.1 System Topology & Data Flow
-```mermaid
-graph TD
-    %% Styling and Colors
-    classDef box fill:#3b0764,stroke:#d8b4fe,stroke-width:2px,color:#f8fafc;
-
-    Dev["Developer / Agent"] -->|1. Request Workspace| Sandbox["platform-actions"]
-    Sandbox -->|2. Retrieve Tools| MCP["platform-mcp-registry"]
-    Sandbox -->|3. Validate Policy| Policies["platform-policies"]
-    Sandbox -->|4. Execute Commands| Workspace["Isolated Worktree Enclave"]
-
-    class Dev,Sandbox,MCP,Policies,Workspace box;
+```yaml
+jobs:
+  preflight:
+    uses: Mindburn-Labs/platform-actions/.github/workflows/agent-preflight.yml@main
 ```
-## 2. Directory Layout & Key Components
-Below is the verified structural topology of the repository:
+
+The `agent.yaml` contract that `agent-preflight.yml` validates requires these keys:
+`repo_type`, `owners`, `commands`, `risk`, `agent_entrypoints` (see this repo's own
+`agent.yaml` for the canonical shape).
+
+## Repository layout
+
 ```text
 .
-├── .github/              # Workflow definitions and default org actions
-├── .devcontainer/        # Ephemeral sandbox configuration for AI agents and devs
-├── docs/                 # Architectural Decision Records (ADRs) and runbooks
-├── observability/        # SLO configurations, custom metrics, and alert rules
-├── CODEOWNERS            # Explicit team ownership definitions
-├── SECURITY.md           # Responsible vulnerability disclosure policy
-├── renovate.json         # Monthly dependency drift manager rules
-├── agent.yaml            # Declarative execution constraints and entrypoints for AI agents
-└── AGENTS.md             # Autonomous engineering directives and test runner indices
+├── .github/workflows/   # The three reusable workflows above
+├── .devcontainer/       # Devcontainer definition (ubuntu base + common-utils)
+├── docs/
+│   ├── adr/             # Architecture Decision Records
+│   └── runbook.md       # Operational runbook
+├── observability/
+│   └── alerts.yaml      # Prometheus alert rule(s) for consuming services
+├── agent.yaml           # Agent contract for this repo (the schema preflight enforces)
+├── catalog-info.yaml    # Backstage component descriptor (kind: library)
+├── Makefile             # Placeholder setup/test/lint/build/agent-context targets
+├── CODEOWNERS           # Ownership: @app-mindburn-web-labs/architecture-platform
+├── SECURITY.md          # Vulnerability disclosure policy
+└── renovate.json        # Renovate dependency config
 ```
 
----
+## Local commands
 
-## 3. Getting Started & Toolchain
-We enforce reproducible development. Ensure you run commands inside the standard devcontainer sandbox environment.
-
-### Prerequisites
-*   Git (authenticated using standard OIDC keyring)
-*   Text toolchain (or equivalent Docker daemon if building containers)
-
-### Standard Development Steps
-To bootstrap, compile, verify, and run compliance validation locally, execute the following commands:
+The `Makefile` targets in this repo are placeholders (they echo and do nothing) —
+this repository ships configuration, not buildable code. The targets exist so the
+reusable gates have something to call; real implementations live in consuming repos.
 
 ```bash
-# 1. Setup and restore dependencies
-# Restore dependencies
-make setup 2>/dev/null || echo "No setup required"
-
-# 2. Static compilation and code-generation
-# Compile target codebase
-make build 2>/dev/null || echo "No build required"
-
-# 3. Code formatting, compliance check, and linting
-# Run static analysis & typecheck
-make lint 2>/dev/null || echo "No lint rules"
-
-# 4. Local testing and assertion validations
-# Run assertions & unit tests
-make test 2>/dev/null || echo "No test target"
+make setup    # placeholder
+make lint     # placeholder
+make test     # placeholder
+make build    # placeholder
 ```
 
----
+## Ownership and security
 
-## 4. Production Observability & Telemetry
-
-#### Local Observability Diagnostics
-*   **Prometheus Scrape Endpoint:** `http://localhost:2112/metrics` (Default Prometheus exposition format)
-*   **OTel Collector Target:** `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP/JSON)
-*   **Health & Readiness SLO Probe:** `GET http://localhost:8080/healthz` or `GET http://localhost:8080/readyz`
-
-High reliability requires comprehensive, zero-bias monitoring. This repository incorporates standard OTel metrics and tracing:
-*   **Metrics Scraper:** Exposes Prometheus scrape metrics tracking `Sandbox startup times, task routing times, policy verification success rates`.
-*   **Tracing Engine:** Injects standard OpenTelemetry propagation headers across downstream boundaries.
-*   **Custom Alerting SLOs:** Located in `observability/alerts.yaml`, raising automated alerts if system availability drops below **99.9%** or error-rate thresholds are violated over a sliding 5-minute interval.
-
----
-
-## 5. Rollback & Disaster Recovery (Rollback Class R1)
-We enforce deterministic rollback guidelines tailored to each component's state and risk tier.
-
-### **Rollback Class R1 Protocol**
-*   **Details:** Platform configuration or policy overlays. Rollback involves reverting policy mappings or OTel scrape rules.
-*   **Mean Time to Restore (MTTR):** Target < 3 minutes under standard stateless rollbacks.
-*   **Incident Runbook:**
-    1.  Inspect active OTel trace IDs to isolate fault signatures.
-    2.  Check K8s deployment statuses or tag deployments inside Argo CD in the GitOps control plane.
-    3.  If stateful migration rollback is blocked, initiate the approved **Forward-Fix** pipeline rather than attempting destructive data reversals.
-
-## 5.1 Production Readiness Gate
-
-`platform-actions/.github/workflows/production-readiness.yml` is the reusable pre-promotion gate for deployable repositories. It runs repository `make` gates and, when present, the release-manifest and GitOps environment validators. This workflow does not deploy; it blocks promotion until a repository can prove its local gates, immutable release evidence, and disabled production sync posture.
-
----
-
-## 6. Secure SDLC & Least Privilege
-
-#### OIDC Pipeline Authentication
-This repository authenticates to cloud infrastructure using passwordless OpenID Connect (OIDC) tokens.
-*   **Audience Mapping:** `https://github.com/Mindburn-Labs`
-*   **Required GitHub Workflow Scopes:**
-    ```yaml
-    permissions:
-      id-token: write   # Required for requesting the JWT OIDC token
-      contents: read    # Required for checkout
-    ```
-*   **Target Cloud IAM Role Variable:** `${{ secrets.GH_ACTIONS_OIDC_ROLE_ARN }}`
-
-*   **OIDC Token Federation:** Direct, passwordless OpenID Connect federation is used for container publishing and cloud deployments.
-*   **Zero Static Keys:** Storing long-lived cloud credentials or environment tokens in repository variables is **strictly forbidden**. All secrets must route dynamically through secure cloud brokers or HashiCorp Vault.
-*   **Automated Updates:** Dependabot / Renovate scans execute monthly to bump minor and patch variations, eliminating package drift.
-
----
-
-## 7. Licensing & Security Contact
-*   **License:** Proprietary. All rights reserved.
-*   **Security Disclosures:** Please report potential vulnerabilities via the instructions in [SECURITY.md](SECURITY.md).
+- **Owner:** `architecture-platform` (see `CODEOWNERS`).
+- **Dependencies:** managed by Renovate (`renovate.json`), with lockfile maintenance enabled.
+- **Security disclosures:** see [SECURITY.md](SECURITY.md) — report privately to `security@mindburn.org`.
