@@ -4,7 +4,7 @@ setup:
 	@echo "Setting up local environment for dev..."
 
 test:
-	@echo "Running local test suite..."
+	@python3 -m unittest discover -s tests -p 'test_*.py'
 
 lint:
 	@echo "Executing lint checks..."

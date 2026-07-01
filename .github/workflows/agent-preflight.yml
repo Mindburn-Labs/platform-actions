@@ -67,19 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! -f agent.yaml ]]; then
-            echo "::error::agent.yaml is required for agent-native repositories"
-            exit 1
-          fi
-          python3 - <<'PY'
-          from pathlib import Path
-
-          text = Path("agent.yaml").read_text(encoding="utf-8")
-          required = ["repo_type:", "owners:", "commands:", "risk:", "agent_entrypoints:"]
-          missing = [key[:-1] for key in required if key not in text]
-          if missing:
-              raise SystemExit(f"agent.yaml missing canonical keys: {', '.join(missing)}")
-          PY
+          python3 scripts/validate-agent-risk.py .
 
       - name: Run focused repository gates
         shell: bash
