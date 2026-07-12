@@ -1,0 +1,17 @@
+name: Validate agent risk contract
+description: Validate the caller repository's agent.yaml risk semantics.
+
+inputs:
+  repository-path:
+    description: Path to the repository whose agent contract is validated.
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Validate agent risk contract
+      shell: bash
+      env:
+        REPOSITORY_PATH: ${{ inputs.repository-path }}
+      run: python3 "$GITHUB_ACTION_PATH/validate-agent-risk.py" "$REPOSITORY_PATH"

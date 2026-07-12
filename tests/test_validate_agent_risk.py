@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "validate-agent-risk.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / ".github"
+    / "actions"
+    / "validate-agent-risk"
+    / "validate-agent-risk.py"
+)
 SPEC = importlib.util.spec_from_file_location("validate_agent_risk", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"unable to load {MODULE_PATH}")
@@ -28,6 +34,20 @@ def write_repo(root: Path, *, name: str, agent_yaml: str, surfaces: tuple[str, .
 
 
 class ValidateAgentRiskTests(unittest.TestCase):
+    def test_reusable_workflow_uses_the_pinned_validator_action(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "agent-preflight.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertRegex(
+            workflow,
+            r"(?m)^\s*uses: Mindburn-Labs/platform-actions/\.github/actions/validate-agent-risk@[0-9a-f]{40}\s*$",
+        )
+        self.assertNotIn("scripts/validate-agent-risk.py", workflow)
+
     def test_gitops_repo_with_underreported_risk_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = write_repo(
