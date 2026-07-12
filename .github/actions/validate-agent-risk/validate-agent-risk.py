@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate agent.yaml structure and gitops/infra risk semantics."""
+"""Validate agent.yaml structure and gitops/infra risk semantics for a caller repo."""
 
 from __future__ import annotations
 

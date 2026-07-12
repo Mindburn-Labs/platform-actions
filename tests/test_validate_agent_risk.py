@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "validate-agent-risk.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / ".github"
+    / "actions"
+    / "validate-agent-risk"
+    / "validate-agent-risk.py"
+)
 SPEC = importlib.util.spec_from_file_location("validate_agent_risk", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"unable to load {MODULE_PATH}")
