@@ -64,10 +64,7 @@ jobs:
           fi
 
       - name: Validate agent.yaml contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/validate-agent-risk.py .
+        uses: Mindburn-Labs/platform-actions/.github/actions/validate-agent-risk@563286acbc8cfa0fd3cd885fe2c4e5b0999ff782
 
       - name: Run focused repository gates
         shell: bash
