@@ -34,6 +34,20 @@ def write_repo(root: Path, *, name: str, agent_yaml: str, surfaces: tuple[str, .
 
 
 class ValidateAgentRiskTests(unittest.TestCase):
+    def test_reusable_workflow_uses_the_pinned_validator_action(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "agent-preflight.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertRegex(
+            workflow,
+            r"(?m)^\s*uses: Mindburn-Labs/platform-actions/\.github/actions/validate-agent-risk@[0-9a-f]{40}\s*$",
+        )
+        self.assertNotIn("scripts/validate-agent-risk.py", workflow)
+
     def test_gitops_repo_with_underreported_risk_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = write_repo(
