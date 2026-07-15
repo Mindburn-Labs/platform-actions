@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,27 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
+def focused_gate_script() -> str:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "agent-preflight.yml"
+    ).read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+    step = lines.index("      - name: Run focused repository gates")
+    run = lines.index("        run: |", step)
+    body: list[str] = []
+    for line in lines[run + 1 :]:
+        if line.startswith("          "):
+            body.append(line[10:])
+        elif line == "":
+            body.append("")
+        else:
+            break
+    return "\n".join(body)
+
+
 def write_repo(root: Path, *, name: str, agent_yaml: str, surfaces: tuple[str, ...]) -> Path:
     repo_root = root / name
     repo_root.mkdir()
@@ -34,6 +56,74 @@ def write_repo(root: Path, *, name: str, agent_yaml: str, surfaces: tuple[str, .
 
 
 class ValidateAgentRiskTests(unittest.TestCase):
+    def test_focused_gates_execute_present_targets_and_skip_missing_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / "Makefile").write_text(
+                ".PHONY: setup test build\n"
+                "setup:\n\t@printf 'setup\\n' >> gate.log\n"
+                "test:\n\t@printf 'test\\n' >> gate.log\n"
+                "build:\n\t@printf 'build\\n' >> gate.log\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", "-c", focused_gate_script()],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (repo_root / "gate.log").read_text(encoding="utf-8").splitlines(),
+                ["setup", "test", "build"],
+            )
+            self.assertIn("No Makefile target 'lint'", result.stdout)
+
+    def test_focused_gates_propagate_present_target_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / "Makefile").write_text(
+                ".PHONY: setup lint test build\n"
+                "setup:\n\t@printf 'setup\\n' >> gate.log\n"
+                "lint:\n\t@printf 'lint\\n' >> gate.log\n\t@exit 17\n"
+                "test:\n\t@printf 'test\\n' >> gate.log\n"
+                "build:\n\t@printf 'build\\n' >> gate.log\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", "-c", focused_gate_script()],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                (repo_root / "gate.log").read_text(encoding="utf-8").splitlines(),
+                ["setup", "lint"],
+            )
+
+    def test_focused_gates_reject_invalid_makefile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            (repo_root / "Makefile").write_text(
+                "setup: missing-input\n\t@printf 'setup\\n' >> gate.log\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["bash", "-c", focused_gate_script()],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((repo_root / "gate.log").exists())
+
     def test_reusable_workflow_uses_the_pinned_validator_action(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[1]

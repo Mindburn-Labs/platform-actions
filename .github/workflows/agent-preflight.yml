@@ -75,8 +75,13 @@ jobs:
             exit 1
           fi
 
+          if ! make_database="$(make -np 2>/dev/null)"; then
+            echo "::error::Unable to inspect Makefile targets"
+            exit 1
+          fi
+
           has_target() {
-            make -qp 2>/dev/null | awk -F: '/^[A-Za-z0-9_.-]+:([^=]|$)/ {print $1}' | grep -qx "$1"
+            awk -F: -v target="$1" '/^[A-Za-z0-9_.-]+:([^=]|$)/ && $1 == target { found = 1 } END { exit !found }' <<<"$make_database"
           }
 
           for target in setup lint test build; do
