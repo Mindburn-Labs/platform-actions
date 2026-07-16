@@ -238,7 +238,10 @@ jobs:
           fi
 
           has_target() {
-            make -qp 2>/dev/null | awk -F: '/^[A-Za-z0-9_.-]+:([^=]|$)/ {print $1}' | grep -qx "$1"
+            # Do not use make -q here: its non-zero "out of date" result becomes
+            # a false negative under pipefail. Print the database in dry-run mode
+            # instead so a declared target is detected before invoking it.
+            make -prRn 2>/dev/null | awk -F: '/^[A-Za-z0-9_.-]+:([^=]|$)/ {print $1}' | grep -qx "$1"
           }
 
           for target in setup lint test build; do
