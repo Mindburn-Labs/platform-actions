@@ -124,7 +124,11 @@ class ValidateAgentRiskTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((repo_root / "gate.log").exists())
 
-    def test_reusable_workflow_uses_the_pinned_validator_action(self) -> None:
+    def test_reusable_workflow_inlines_the_validator(self) -> None:
+        # HELM-216: a composite action referenced from a reusable workflow resolves against
+        # the CALLER repo and startup-fails cross-repo callers, so the validator is inlined.
+        # Drift between the inline copy and the canonical script is guarded by
+        # tests/test_inline_validator_drift.py.
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github"
@@ -132,9 +136,10 @@ class ValidateAgentRiskTests(unittest.TestCase):
             / "agent-preflight.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertRegex(
+        self.assertIn("python3 - \".\" <<'VALIDATE_AGENT_RISK_PY'", workflow)
+        self.assertNotRegex(
             workflow,
-            r"(?m)^\s*uses: Mindburn-Labs/platform-actions/\.github/actions/validate-agent-risk@[0-9a-f]{40}\s*$",
+            r"(?m)^\s*uses: Mindburn-Labs/platform-actions/\.github/actions/validate-agent-risk@",
         )
         self.assertNotIn("scripts/validate-agent-risk.py", workflow)
 
