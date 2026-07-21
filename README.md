@@ -44,7 +44,7 @@ The `agent.yaml` contract that `agent-preflight.yml` validates requires these ke
 ├── agent.yaml           # Agent contract for this repo (the schema preflight enforces)
 ├── catalog-info.yaml    # Backstage component descriptor (kind: library)
 ├── Makefile             # Placeholder setup/test/lint/build/agent-context targets
-├── CODEOWNERS           # Ownership: @app-mindburn-web-labs/architecture-platform
+├── CODEOWNERS           # Ownership: @mindburn-labs/architecture-platform
 ├── SECURITY.md          # Vulnerability disclosure policy
 └── renovate.json        # Renovate dependency config
 ```
