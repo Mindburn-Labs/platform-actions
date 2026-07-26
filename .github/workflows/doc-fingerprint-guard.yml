@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   doc-fingerprint-guard:
+    timeout-minutes: 20
     name: Reject fabricated-template / corrupted-doc fingerprints
     runs-on: ubuntu-latest
     steps:
