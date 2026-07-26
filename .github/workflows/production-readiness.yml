@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   production-readiness:
+    timeout-minutes: 20
     name: Production readiness validation
     runs-on: ubuntu-latest
     steps:
