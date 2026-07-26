@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   agent-preflight:
+    timeout-minutes: 20
     name: Agent contract and focused gates
     runs-on: ubuntu-latest
     steps:
