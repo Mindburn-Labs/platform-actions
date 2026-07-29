@@ -59,6 +59,10 @@ jobs:
             echo "no local go.mod replace targets"
             exit 0
           fi
+          if [ -f vendor/modules.txt ] && GOWORK=off go list -mod=vendor ./... >/dev/null 2>&1; then
+            echo "vendored Go dependencies satisfy local replacements"
+            exit 0
+          fi
           if [ -z "${MINDBURN_ORG_READ_TOKEN:-}" ]; then
             echo "::error::go.mod replace targets sibling repos (${siblings[*]}) but MINDBURN_ORG_READ_TOKEN was not passed to this reusable workflow. Add it under the caller job's secrets: block."
             exit 1
