@@ -49,8 +49,8 @@ jobs:
           # next to the caller checkout when the caller passed an org read token.
           # (Line-form replaces only; block-form `replace ( ... )` is not parsed.)
           mapfile -t siblings < <( \
-            find . -maxdepth 3 -name go.mod 2>/dev/null \
-              | xargs -r grep -hE '=> \.\./[A-Za-z0-9._-]+' 2>/dev/null \
+            find . -maxdepth 3 -name go.mod -print0 2>/dev/null \
+              | xargs -0 -r grep -hE '=> \.\./[A-Za-z0-9._-]+' 2>/dev/null \
               | sed -E 's/.*=> \.\.\/([A-Za-z0-9._-]+).*/\1/' \
               | sort -u \
           )
@@ -62,10 +62,21 @@ jobs:
             echo "::error::go.mod replace targets sibling repos (${siblings[*]}) but MINDBURN_ORG_READ_TOKEN was not passed to this reusable workflow. Add it under the caller job's secrets: block."
             exit 1
           fi
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\\n' 'x-access-token' ;;
+            *Password*) printf '%s\\n' "${MINDBURN_ORG_READ_TOKEN:?}" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
           for repo in "${siblings[@]}"; do
             echo "cloning sibling repo: $repo"
-            git clone --depth 1 \
-              "https://x-access-token:${MINDBURN_ORG_READ_TOKEN}@github.com/Mindburn-Labs/${repo}.git" \
+            GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git clone --depth 1 \
+              "https://github.com/Mindburn-Labs/${repo}.git" \
               "../${repo}"
           done
 
