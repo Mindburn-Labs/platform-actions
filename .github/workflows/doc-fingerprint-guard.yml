@@ -23,8 +23,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
 
       - name: Scan Markdown for banned fingerprints
         shell: bash
@@ -33,8 +31,15 @@ jobs:
           # High-specificity strings unique to the fabricated-template / domain corruption.
           # These never appear in legitimate Mindburn docs; a hit means regrowth.
           patterns='app-mindburn-web\.org|svc-titan-proofd|Rollback Class R[0-9]|sovereign microservice|HELM Notary'
-          hits="$(grep -rnE "$patterns" --include='*.md' . \
-            | grep -v -e '/node_modules/' -e '/.git/' -e '/vendor/' -e '/.codex-security-scan/' || true)"
+          # git grep: 0 = match, 1 = clean, >1 = scanner error → fail closed.
+          # Tracked files only, so .git/node_modules/vendor never enter; the
+          # old `grep -rnE ... | grep -v ... || true` swallowed scanner
+          # errors as "no matches".
+          hits="$(git grep -nE "$patterns" -- '*.md')" && rc=0 || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::doc fingerprint scan failed: git grep exited $rc"
+            exit "$rc"
+          fi
           if [ -n "$hits" ]; then
             echo "::error::Banned doc fingerprint(s) found — fabricated-template or corrupted-domain regrowth. Fix before merge:"
             echo "$hits"
