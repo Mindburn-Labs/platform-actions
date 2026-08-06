@@ -2,6 +2,12 @@ name: AI Agent Review & Preflight
 
 on:
   workflow_call:
+    secrets:
+      # Optional. Only needed when the caller's go.mod uses the local-dev
+      # pattern `replace github.com/Mindburn-Labs/<repo> => ../<repo>`; the
+      # gate then clones those sibling repos so `make build/test` resolves.
+      MINDBURN_ORG_READ_TOKEN:
+        required: false
   pull_request:
     branches:
       - main
@@ -12,6 +18,7 @@ permissions:
 
 jobs:
   agent-preflight:
+    timeout-minutes: 20
     name: Agent contract and focused gates
     runs-on: ubuntu-latest
     steps:
@@ -30,6 +37,53 @@ jobs:
           [[ -f pyproject.toml || -f requirements.txt ]] && echo "python=true" >> "$GITHUB_OUTPUT" || echo "python=false" >> "$GITHUB_OUTPUT"
           [[ -f Cargo.toml ]] && echo "rust=true" >> "$GITHUB_OUTPUT" || echo "rust=false" >> "$GITHUB_OUTPUT"
           [[ -f pubspec.yaml ]] && echo "flutter=true" >> "$GITHUB_OUTPUT" || echo "flutter=false" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize local go.mod replace targets
+        shell: bash
+        env:
+          MINDBURN_ORG_READ_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Local-dev pattern: `replace github.com/Mindburn-Labs/<repo> => ../<repo>`.
+          # CI checks out only the caller repo, so `go build`/`go test` fail with
+          # "replacement directory ../<repo> does not exist". Clone the siblings
+          # next to the caller checkout when the caller passed an org read token.
+          # (Line-form replaces only; block-form `replace ( ... )` is not parsed.)
+          mapfile -t siblings < <( \
+            find . -maxdepth 3 -name go.mod -print0 2>/dev/null \
+              | xargs -0 -r grep -hE '=> \.\./[A-Za-z0-9._-]+' 2>/dev/null \
+              | sed -E 's/.*=> \.\.\/([A-Za-z0-9._-]+).*/\1/' \
+              | sort -u \
+          )
+          if [ "${#siblings[@]}" -eq 0 ]; then
+            echo "no local go.mod replace targets"
+            exit 0
+          fi
+          if [ -f vendor/modules.txt ] && GOWORK=off go list -mod=vendor ./... >/dev/null 2>&1; then
+            echo "vendored Go dependencies satisfy local replacements"
+            exit 0
+          fi
+          if [ -z "${MINDBURN_ORG_READ_TOKEN:-}" ]; then
+            echo "::error::go.mod replace targets sibling repos (${siblings[*]}) but MINDBURN_ORG_READ_TOKEN was not passed to this reusable workflow. Add it under the caller job's secrets: block."
+            exit 1
+          fi
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\\n' 'x-access-token' ;;
+            *Password*) printf '%s\\n' "${MINDBURN_ORG_READ_TOKEN:?}" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
+          for repo in "${siblings[@]}"; do
+            echo "cloning sibling repo: $repo"
+            GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git clone --depth 1 \
+              "https://github.com/Mindburn-Labs/${repo}.git" \
+              "../${repo}"
+          done
 
       - name: Set up Go
         if: steps.detect.outputs.go == 'true'
@@ -237,7 +291,10 @@ jobs:
             exit 1
           fi
 
-          if ! make_database="$(make -np 2>/dev/null)"; then
+          # Do not use make -q here: its non-zero "out of date" result becomes
+          # a false negative under pipefail. Parse the dry-run database once and
+          # fail closed when the Makefile itself is invalid.
+          if ! make_database="$(make -prRn 2>/dev/null)"; then
             echo "::error::Unable to inspect Makefile targets"
             exit 1
           fi
