@@ -291,11 +291,16 @@ jobs:
             exit 1
           fi
 
+          # Do not use make -q here: its non-zero "out of date" result becomes
+          # a false negative under pipefail. Parse the dry-run database once and
+          # fail closed when the Makefile itself is invalid.
+          if ! make_database="$(make -prRn 2>/dev/null)"; then
+            echo "::error::Unable to inspect Makefile targets"
+            exit 1
+          fi
+
           has_target() {
-            # Do not use make -q here: its non-zero "out of date" result becomes
-            # a false negative under pipefail. Print the database in dry-run mode
-            # instead so a declared target is detected before invoking it.
-            make -prRn 2>/dev/null | awk -F: '/^[A-Za-z0-9_.-]+:([^=]|$)/ {print $1}' | grep -qx "$1"
+            awk -F: -v target="$1" '/^[A-Za-z0-9_.-]+:([^=]|$)/ && $1 == target { found = 1 } END { exit !found }' <<<"$make_database"
           }
 
           for target in setup lint test build; do
