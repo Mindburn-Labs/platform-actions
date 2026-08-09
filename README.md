@@ -39,8 +39,6 @@ The `agent.yaml` contract that `agent-preflight.yml` validates requires these ke
 ├── docs/
 │   ├── adr/             # Architecture Decision Records
 │   └── runbook.md       # Operational runbook
-├── observability/
-│   └── alerts.yaml      # Prometheus alert rule(s) for consuming services
 ├── agent.yaml           # Agent contract for this repo (the schema preflight enforces)
 ├── catalog-info.yaml    # Backstage component descriptor (kind: library)
 ├── Makefile             # Placeholder setup/test/lint/build/agent-context targets
