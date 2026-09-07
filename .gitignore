@@ -2,3 +2,5 @@
 *.log
 .claude/
 .codegraph/
+__pycache__/
+*.pyc
