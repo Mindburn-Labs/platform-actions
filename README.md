@@ -22,7 +22,10 @@ Every repository:
 3. requires one status check, `ci / gate` (the caller job id is `ci`, the
    reusable job is `gate`), through the org ruleset.
 4. copies [`templates/dependabot.yml`](templates/dependabot.yml) to
-   `.github/dependabot.yml` and keeps the blocks for ecosystems it has.
+   `.github/dependabot.yml` and keeps the blocks for ecosystems it has, and
+   copies [`templates/dependabot-auto-merge.yml`](templates/dependabot-auto-merge.yml)
+   to `.github/workflows/` so patch and minor updates merge themselves on a
+   green `ci / gate`.
 5. pins `@v2`. `v2` is a moving major tag: compatible changes move it,
    breaking changes become `v3`.
 
@@ -32,7 +35,38 @@ jobs:
     uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
 ```
 
-Repositories that ship images add a tag-triggered caller:
+Repositories that release keep the `tag` and `image` jobs of
+`templates/ci.yml`: on a push to the default branch, `ci` passes, `auto-tag`
+pushes the next `v<semver>` tag, and `release-image` builds that tag, all in
+one run:
+
+```yaml
+jobs:
+  ci:
+    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
+  tag:
+    needs: ci
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2
+  image:
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+```
+
+No App token is needed: the tag is pushed with `GITHUB_TOKEN`, which starts no
+other workflow, so the release is chained on the `tag` output instead. A tag
+cut by hand or by an agent (`git push origin v1.2.3`) goes through a
+tag-triggered caller, which can coexist with the chain:
 
 ```yaml
 on:
@@ -49,6 +83,10 @@ jobs:
       id-token: write
       attestations: write
 ```
+
+To keep one definition, make that file both tag-triggered and
+`workflow_call`-able (input `tag`), and let the chain's `image` job call it
+with `uses: ./.github/workflows/<file>.yml` and `secrets: inherit`.
 
 ### `ci.yml`
 
@@ -80,23 +118,28 @@ Called after `ci` on push (see the `tag` job in `templates/ci.yml`). It takes
 the newest `vMAJOR.MINOR.PATCH` tag and bumps it from the conventional commits
 since then: `type!:` or `BREAKING CHANGE:` is major, `feat` minor,
 `fix`/`perf`/`revert` patch, anything else releases nothing. The tag is pushed
-with a `mindburn-flux` App installation token, because a tag pushed with
-`GITHUB_TOKEN` would not trigger the release workflow.
+with the calling job's `GITHUB_TOKEN`, so that job grants `contents: write`;
+the release is chained on the `tag` output in the same run. Optionally, pass
+the `mindburn-flux` App secrets to push as the App instead: an App push also
+starts `on: push: tags` workflows, and `contents: read` is then enough.
 
 | Input / secret | Default | Meaning |
 | --- | --- | --- |
 | `dry-run` | `false` | Compute and print the tag; mint no token, push nothing. |
 | `initial-version` | `0.1.0` | First tag when the repository has no release tag. |
-| secrets `MINDBURN_FLUX_APP_ID`, `MINDBURN_FLUX_PRIVATE_KEY` | none | Required unless `dry-run`. |
+| secrets `MINDBURN_FLUX_APP_ID`, `MINDBURN_FLUX_PRIVATE_KEY` | none | Optional: push as the `mindburn-flux` App. |
 | output `tag` | | The tag pushed, or empty. |
 
 ### `release-image.yml`
 
-On a `v<semver>` tag whose commit is on the default branch: buildx builds every
-platform and pushes the index to GHCR by digest; syft writes an SPDX SBOM per
+On a `v<semver>` tag (pushed, or passed as `tag` by the chain) whose commit is
+on the default branch: `setup-commands` stages anything the build needs beyond
+the checkout, buildx builds every platform and pushes the index to GHCR by digest; syft writes an SPDX SBOM per
 platform, attached with `cosign attest`; `cosign sign --recursive` signs keyless
 through GitHub OIDC; `actions/attest-build-provenance` adds SLSA provenance;
-then the signature is verified and the tag is created on that digest. A tag
+then the signature is verified and the tag is created on that digest.
+`verify-commands` runs against the pushed digest before the SBOM, signature
+and tag, so a failed smoke test leaves no tag behind. A tag
 that already exists in GHCR is never overwritten. The certificate identity is
 `https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@refs/tags/v2`.
 
@@ -106,10 +149,30 @@ that already exists in GHCR is never overwritten. The certificate identity is
 | `context` | `.` | Build context. |
 | `dockerfile` | `<context>/Dockerfile` | Dockerfile path. |
 | `platforms` | `linux/amd64,linux/arm64` | Target platforms. |
-| `build-args` | `''` | Newline-separated `KEY=VALUE`. |
+| `build-args` | `''` | Newline-separated `KEY=VALUE`; a bare `KEY` takes its value from the environment (for example from `setup-commands` via `$GITHUB_ENV`). |
+| `build-contexts` | `''` | Newline-separated `name=path` named contexts, relative to the workspace. |
 | `tag` | the pushed git tag | Release tag. |
-| `dry-run` | `false` | Build every platform; no push, signature or tag. |
+| `dry-run` | `false` | Build every platform; no push, signature or tag. `setup-commands` still runs; `verify-commands` does not. |
+| `setup-commands` | `''` | Shell run at the workspace root after checkout, before the build: clone sibling repositories, stage contexts inside the workspace. Env: `MINDBURN_ORG_READ_TOKEN`, `RELEASE_IMAGE`, `RELEASE_TAG`, `SOURCE_SHA`. |
+| `verify-commands` | `''` | Shell run after the push by digest, before SBOM, signature and tag (for example a runtime smoke test). Env: `RELEASE_IMAGE`, `RELEASE_TAG`, `RELEASE_DIGEST`, `SOURCE_SHA`, `RELEASE_PLATFORMS_FILE` (`os/arch<TAB>digest` lines). |
+| secret `MINDBURN_ORG_READ_TOKEN` | none | Read token for sibling repositories, exposed to `setup-commands` only. |
 | outputs `image`, `tag`, `digest` | | What was published. |
+
+### `dependabot-auto-merge.yml`
+
+Called from `pull_request` (see
+[`templates/dependabot-auto-merge.yml`](templates/dependabot-auto-merge.yml)).
+For a Dependabot PR whose update type is patch or minor, it arms GitHub
+auto-merge (`gh pr merge --auto --squash`), so the PR merges when the required
+checks pass and stays open when they fail. Majors are left for review. It arms
+nothing while the base branch has no required-status-check rule, because
+auto-merge would then merge without CI. The repository needs "Allow
+auto-merge".
+
+| Input / secret | Default | Meaning |
+| --- | --- | --- |
+| `update-types` | `version-update:semver-patch,version-update:semver-minor` | Update types that merge automatically. |
+| secrets `MINDBURN_FLUX_APP_ID`, `MINDBURN_FLUX_PRIVATE_KEY` | none | Optional, stored as Dependabot secrets: arm auto-merge as the App, so the merge push runs CI on the default branch (and auto-tag). A `GITHUB_TOKEN` merge starts no push workflow. |
 
 ### Deprecated
 
@@ -122,10 +185,11 @@ until those move to v2. `production-readiness.yml` has no known callers.
 ```text
 .
 ├── .github/workflows/
-│   ├── ci.yml, auto-tag.yml, release-image.yml   # v2 reusable workflows
-│   ├── self-ci.yml                                # this repo's CI: calls the three above
+│   ├── ci.yml, auto-tag.yml, release-image.yml,  # v2 reusable workflows
+│   │   dependabot-auto-merge.yml
+│   ├── self-ci.yml                                # this repo's CI: calls the four above
 │   └── agent-preflight.yml, doc-fingerprint-guard.yml, production-readiness.yml
-├── templates/           # caller ci.yml and dependabot.yml for other repositories
+├── templates/           # caller ci.yml, dependabot.yml and dependabot-auto-merge.yml
 ├── tests/               # unit tests for the inline workflow scripts
 ├── agent.yaml           # agent contract checked by agent-preflight.yml
 └── Makefile             # check = lint + test
@@ -142,7 +206,9 @@ make test    # Python unit tests in tests/
 The workflow scripts are inline, because a reusable workflow checks out the
 caller and cannot read files from this repository. `tests/` runs those inline
 scripts against fixtures. On a pull request, `self-ci.yml` runs `ci.yml`, a dry
-run of `auto-tag.yml` and a dry-run multi-arch build of `release-image.yml`.
+run of `auto-tag.yml`, a dry-run multi-arch build of `release-image.yml` with
+`setup-commands` and a named build context, and, on this repository's own
+Dependabot PRs, `dependabot-auto-merge.yml`.
 
 ## Ownership and security
 

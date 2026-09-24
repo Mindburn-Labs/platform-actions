@@ -237,6 +237,67 @@ class DependencyScanTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
 
+class DependabotAutoMergeTest(unittest.TestCase):
+    SCRIPT = step_script("dependabot-auto-merge.yml", "Arm auto-merge for patch and minor updates")
+    DEFAULT_TYPES = "version-update:semver-patch,version-update:semver-minor"
+
+    def arm(self, update_type: str, required_rules: int) -> tuple[subprocess.CompletedProcess[str], str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            log = work / "gh.log"
+            gh = work / "gh"
+            # A stand-in for the gh CLI: `api` answers with the number of
+            # required-status-check rules, every call is logged.
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                f'echo "$*" >>"{log}"\n'
+                f'if [[ "$1" == api ]]; then echo {required_rules}; fi\n',
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            result = run_bash(
+                self.SCRIPT,
+                work,
+                {
+                    "PATH": f"{work}:{os.environ['PATH']}",
+                    "GITHUB_REPOSITORY": "Mindburn-Labs/example",
+                    "PR_URL": "https://github.com/Mindburn-Labs/example/pull/7",
+                    "BASE": "main",
+                    "UPDATE_TYPE": update_type,
+                    "UPDATE_TYPES": self.DEFAULT_TYPES,
+                    "DEPENDENCIES": "lodash",
+                },
+            )
+            calls = log.read_text(encoding="utf-8") if log.exists() else ""
+            return result, calls
+
+    def test_patch_arms_auto_merge(self) -> None:
+        result, calls = self.arm("version-update:semver-patch", required_rules=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("pr merge --auto --squash https://github.com/Mindburn-Labs/example/pull/7", calls)
+        self.assertIn("api repos/Mindburn-Labs/example/rules/branches/main", calls)
+
+    def test_minor_arms_auto_merge(self) -> None:
+        _, calls = self.arm("version-update:semver-minor", required_rules=2)
+        self.assertIn("pr merge --auto --squash", calls)
+
+    def test_major_is_left_for_review(self) -> None:
+        result, calls = self.arm("version-update:semver-major", required_rules=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls, "")
+        self.assertIn("left for review", result.stdout)
+
+    def test_unknown_update_type_is_left_for_review(self) -> None:
+        _, calls = self.arm("", required_rules=1)
+        self.assertEqual(calls, "")
+
+    def test_no_required_check_arms_nothing(self) -> None:
+        result, calls = self.arm("version-update:semver-patch", required_rules=0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("pr merge", calls)
+        self.assertIn("no required status check", result.stdout)
+
+
 class GateTest(unittest.TestCase):
     SCRIPT = step_script("ci.yml", "Require every job to succeed or be skipped")
 

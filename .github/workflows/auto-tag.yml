@@ -1,14 +1,21 @@
 # Auto-tag v2: a green default branch tags itself.
 #
-# Call it from the CI workflow, after the CI job, on push only:
+# Call it from the CI workflow, after the CI job, on push only, and chain the
+# release in the same run (see templates/ci.yml):
 #
 #   tag:
 #     needs: ci
 #     if: github.event_name == 'push'
+#     permissions:
+#       contents: write
 #     uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2
-#     secrets:
-#       MINDBURN_FLUX_APP_ID: ${{ secrets.MINDBURN_FLUX_APP_ID }}
-#       MINDBURN_FLUX_PRIVATE_KEY: ${{ secrets.MINDBURN_FLUX_PRIVATE_KEY }}
+#   image:
+#     needs: tag
+#     if: needs.tag.outputs.tag != ''
+#     permissions: {contents: read, packages: write, id-token: write, attestations: write}
+#     uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+#     with:
+#       tag: ${{ needs.tag.outputs.tag }}
 #
 # `needs: ci` is what makes it "green": the job runs only when every CI job on
 # this exact commit passed.
@@ -19,11 +26,16 @@
 # is patch, anything else releases nothing. With no previous release the first
 # tag is `initial-version`. Tags such as chart-v1.2.3 are ignored.
 #
-# WHY A GITHUB APP TOKEN. A tag pushed with GITHUB_TOKEN does not trigger other
-# workflows, so the tag-triggered release would never run. The push uses a
-# short-lived installation token of the `mindburn-flux` App, scoped to this
-# repository with contents:write — the same approach as app-helm-console's
-# auto-tag.yml. Without the App secrets the mint step fails loudly.
+# THE PUSH CREDENTIAL. By default the tag is pushed with GITHUB_TOKEN, so the
+# calling job grants `contents: write`. A tag pushed with GITHUB_TOKEN does not
+# start other workflows, which is why the release job is chained on the `tag`
+# output in the same run instead of listening for the tag.
+#
+# Optional: pass the `mindburn-flux` App secrets to push with a short-lived
+# installation token instead (contents:write on this repository only). An App
+# push does start `on: push: tags` workflows, for repositories that keep a
+# separate tag-triggered release. With the App secrets, `contents: read` on
+# the calling job is enough.
 #
 # LIGHTWEIGHT TAGS, as in app-helm-console: for an annotated tag, github.sha
 # in a tag-triggered workflow is the tag object, which older release
@@ -43,8 +55,10 @@ on:
         default: 0.1.0
     secrets:
       MINDBURN_FLUX_APP_ID:
+        description: Optional. With MINDBURN_FLUX_PRIVATE_KEY, push the tag as the mindburn-flux App instead of GITHUB_TOKEN.
         required: false
       MINDBURN_FLUX_PRIVATE_KEY:
+        description: Optional. The mindburn-flux App private key.
         required: false
     outputs:
       tag:
@@ -61,8 +75,8 @@ jobs:
     if: inputs.dry-run || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
+    # No `permissions:` here on purpose: the job inherits the calling job's
+    # token, which needs `contents: write` when no App secrets are passed.
     # One real claim at a time per repository, never cancelled halfway. Dry
     # runs get their own group so they can never displace a pending real run.
     concurrency:
@@ -72,10 +86,11 @@ jobs:
       tag: ${{ steps.next.outputs.tag }}
     env:
       SOURCE_SHA: ${{ github.sha }}
+      USE_APP: ${{ secrets.MINDBURN_FLUX_APP_ID != '' && secrets.MINDBURN_FLUX_PRIVATE_KEY != '' }}
     steps:
       - name: Mint a GitHub App installation token
         id: app
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && env.USE_APP == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.MINDBURN_FLUX_APP_ID }}
@@ -90,7 +105,8 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 0
           fetch-tags: true
-          # The App token becomes the push credential for `git push` below.
+          # The push credential for `git push` below: the App token when the
+          # App secrets were passed, else GITHUB_TOKEN.
           token: ${{ steps.app.outputs.token || github.token }}
           persist-credentials: ${{ !inputs.dry-run }}
 
@@ -154,7 +170,12 @@ jobs:
           TAG: ${{ steps.next.outputs.tag }}
         run: |
           git tag "${TAG}" "${SOURCE_SHA}"
-          git push origin "refs/tags/${TAG}"
+          if ! git push origin "refs/tags/${TAG}"; then
+            if [[ "${USE_APP}" != true ]]; then
+              echo "::error::pushing ${TAG} with GITHUB_TOKEN failed; grant 'contents: write' on the calling job or pass the mindburn-flux App secrets"
+            fi
+            exit 1
+          fi
           echo "::notice::pushed ${TAG} at ${SOURCE_SHA}"
 
       - name: Summary

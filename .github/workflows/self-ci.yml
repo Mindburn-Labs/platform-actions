@@ -45,3 +45,15 @@ jobs:
     with:
       context: tests/fixtures/image
       dry-run: true
+      setup-commands: |
+        mkdir -p .release-context
+        printf '%s %s\n' "${RELEASE_TAG}" "${SOURCE_SHA}" >.release-context/note.txt
+      build-contexts: staged=.release-context
+
+  # This repository's own Dependabot PRs, through the reusable workflow.
+  dependabot:
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
+    uses: ./.github/workflows/dependabot-auto-merge.yml
+    permissions:
+      contents: write
+      pull-requests: write

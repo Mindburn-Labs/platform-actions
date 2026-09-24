@@ -8,7 +8,7 @@ check: lint test
 lint:
 	@command -v actionlint >/dev/null || { echo "actionlint is required" >&2; exit 1; }
 	@command -v shellcheck >/dev/null || { echo "shellcheck is required" >&2; exit 1; }
-	actionlint .github/workflows/*.yml templates/ci.yml
+	actionlint .github/workflows/*.yml templates/ci.yml templates/dependabot-auto-merge.yml
 	git ls-files -z '*.sh' | xargs -0 -r shellcheck
 
 test:
