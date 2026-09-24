@@ -1,0 +1,90 @@
+# Dependabot auto-merge v2: patch and minor Dependabot PRs merge themselves
+# when the branch's required checks (`ci / gate`) pass. Caller:
+# templates/dependabot-auto-merge.yml.
+#
+# The job arms GitHub auto-merge (`gh pr merge --auto --squash`); GitHub then
+# merges once the required checks are green, and a red check keeps the PR
+# open. Majors are left for an agent to review. Because an armed PR on a
+# branch with no required check would merge at once, the job arms nothing
+# until the base branch has a required-status-check rule (the org ruleset).
+#
+# THE MERGE CREDENTIAL. With GITHUB_TOKEN, GitHub merges on behalf of
+# github-actions, and that merge push starts no workflows: no CI on the
+# default branch, so no auto-tag and no release for the update. Pass the
+# `mindburn-flux` App secrets to arm auto-merge as the App instead, so the
+# merge runs the push workflows. Dependabot runs see only Dependabot secrets,
+# so store MINDBURN_FLUX_APP_ID and MINDBURN_FLUX_PRIVATE_KEY there
+# (Settings > Secrets and variables > Dependabot, or the org equivalent).
+#
+# Requires the repository setting "Allow auto-merge" (allow_auto_merge).
+name: Dependabot auto-merge v2
+
+on:
+  workflow_call:
+    inputs:
+      update-types:
+        description: Comma-separated fetch-metadata update types that merge automatically.
+        type: string
+        default: version-update:semver-patch,version-update:semver-minor
+    secrets:
+      MINDBURN_FLUX_APP_ID:
+        description: Optional (as a Dependabot secret). Arm auto-merge as the mindburn-flux App so the merge push runs workflows.
+        required: false
+      MINDBURN_FLUX_PRIVATE_KEY:
+        description: Optional (as a Dependabot secret). The mindburn-flux App private key.
+        required: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  auto-merge:
+    name: auto-merge
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No `permissions:` here: the calling job grants contents: write and
+    # pull-requests: write, which a GITHUB_TOKEN merge needs.
+    env:
+      USE_APP: ${{ secrets.MINDBURN_FLUX_APP_ID != '' && secrets.MINDBURN_FLUX_PRIVATE_KEY != '' }}
+    steps:
+      - name: Read the Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Mint a GitHub App installation token
+        id: app
+        if: env.USE_APP == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.MINDBURN_FLUX_APP_ID }}
+          private-key: ${{ secrets.MINDBURN_FLUX_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Arm auto-merge for patch and minor updates
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          UPDATE_TYPES: ${{ inputs.update-types }}
+          DEPENDENCIES: ${{ steps.meta.outputs.dependency-names }}
+        run: |
+          if [[ ",${UPDATE_TYPES// /}," != *",${UPDATE_TYPE},"* ]]; then
+            echo "::notice::${DEPENDENCIES}: ${UPDATE_TYPE:-unknown update type} is not auto-merged; left for review"
+            exit 0
+          fi
+          required="$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE}" \
+            --jq '[.[] | select(.type == "required_status_checks")] | length')"
+          if [[ "${required}" -eq 0 ]]; then
+            echo "::warning::${BASE} has no required status check, so auto-merge would merge without CI; not arming it. Apply the org ruleset that requires ci / gate."
+            exit 0
+          fi
+          gh pr merge --auto --squash "${PR_URL}"
+          echo "::notice::auto-merge armed for ${DEPENDENCIES} (${UPDATE_TYPE})"

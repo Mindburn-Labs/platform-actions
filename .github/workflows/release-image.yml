@@ -1,4 +1,7 @@
-# Release image v2: a pushed v<semver> tag becomes a signed multi-arch image.
+# Release image v2: a v<semver> release tag becomes a signed multi-arch image.
+#
+# Two entry points. Chained after auto-tag.yml in the CI run (templates/ci.yml),
+# passing `tag: ${{ needs.tag.outputs.tag }}`; or on a pushed tag:
 #
 #   on:
 #     push:
@@ -12,12 +15,19 @@
 #         id-token: write
 #         attestations: write
 #
+# Repositories whose Dockerfile needs more than their own checkout (sibling
+# repositories, named contexts, computed build arguments) stage it in
+# `setup-commands`, and smoke-test the pushed image in `verify-commands`
+# before anything is signed or tagged.
+#
 # Derived from svc-helm-control-plane/.github/workflows/release-tag-image.yml,
 # without its repository-specific contexts and smoke tests. Steps:
 #   1. The tag must be vMAJOR.MINOR.PATCH[-PRERELEASE] on a commit that is on
 #      the default branch, and must not exist in GHCR yet (tags are immutable).
+#      `setup-commands` runs next, in dry runs too.
 #   2. Buildx builds every platform and pushes the index by digest only, so no
-#      tag points at an image before it is signed.
+#      tag points at an image before it is signed. `verify-commands` runs
+#      against that digest.
 #   3. Per platform: an SPDX SBOM from syft, attached with `cosign attest`.
 #   4. `cosign sign --recursive` signs the index and each platform manifest
 #      keyless through GitHub OIDC; SLSA build provenance is attested with
@@ -65,6 +75,32 @@ on:
         description: Build all platforms but do not push, sign or tag.
         type: boolean
         default: false
+      setup-commands:
+        description: >-
+          Shell run at the workspace root after checkout and before the build,
+          in dry runs too: clone sibling repositories, stage build contexts
+          inside the workspace. Env: MINDBURN_ORG_READ_TOKEN, RELEASE_IMAGE,
+          RELEASE_TAG, SOURCE_SHA. Lines appended to $GITHUB_ENV reach the
+          build, so a bare `NAME` in build-args passes a value computed here.
+        type: string
+        default: ''
+      build-contexts:
+        description: Newline-separated name=path named build contexts, paths relative to the workspace.
+        type: string
+        default: ''
+      verify-commands:
+        description: >-
+          Shell run after the index is pushed by digest and before the SBOM,
+          signature and tag; skipped in dry runs. Docker is logged in to GHCR.
+          Env: RELEASE_IMAGE, RELEASE_TAG, RELEASE_DIGEST, SOURCE_SHA,
+          RELEASE_PLATFORMS_FILE (lines of os/arch<TAB>digest). A failure
+          stops the release before anything is tagged.
+        type: string
+        default: ''
+    secrets:
+      MINDBURN_ORG_READ_TOKEN:
+        description: Optional read token for sibling repositories; exposed to setup-commands only.
+        required: false
     outputs:
       image:
         description: Image name without tag.
@@ -91,7 +127,7 @@ jobs:
       id-token: write
       attestations: write
     concurrency:
-      group: release-image-${{ github.repository }}-${{ inputs.tag || github.ref_name }}
+      group: release-image-${{ github.repository }}-${{ inputs.image }}-${{ inputs.tag || github.ref_name }}
       cancel-in-progress: false
     outputs:
       image: ${{ steps.meta.outputs.image }}
@@ -138,8 +174,21 @@ jobs:
             echo "image=${image}"
             echo "tag=${tag}"
             echo "source_sha=${source_sha}"
+            # One build cache per image, so two images of one repository do
+            # not evict each other.
+            echo "cache_scope=release-image-${image//[^A-Za-z0-9._-]/-}"
           } >>"${GITHUB_OUTPUT}"
           echo "releasing ${image}:${tag} from ${source_sha} (dry run: ${DRY_RUN})"
+
+      - name: Run setup commands
+        if: inputs.setup-commands != ''
+        env:
+          COMMANDS: ${{ inputs.setup-commands }}
+          MINDBURN_ORG_READ_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+          RELEASE_IMAGE: ${{ steps.meta.outputs.image }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+        run: eval "${COMMANDS}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
@@ -177,6 +226,7 @@ jobs:
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
+          build-contexts: ${{ inputs.build-contexts }}
           platforms: ${{ inputs.platforms }}
           build-args: ${{ inputs.build-args }}
           # SBOM and provenance are attached below as signed attestations;
@@ -188,8 +238,8 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
-          cache-from: type=gha,scope=release-image
-          cache-to: type=gha,scope=release-image,mode=max
+          cache-from: type=gha,scope=${{ steps.meta.outputs.cache_scope }}
+          cache-to: type=gha,scope=${{ steps.meta.outputs.cache_scope }},mode=max
 
       - name: Verify the pushed index
         id: index
@@ -215,6 +265,17 @@ jobs:
             exit 1
           fi
           cat platforms.tsv
+
+      - name: Run verify commands
+        if: ${{ !inputs.dry-run && inputs.verify-commands != '' }}
+        env:
+          COMMANDS: ${{ inputs.verify-commands }}
+          RELEASE_IMAGE: ${{ steps.meta.outputs.image }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          RELEASE_PLATFORMS_FILE: ${{ github.workspace }}/platforms.tsv
+        run: eval "${COMMANDS}"
 
       - name: Install syft
         id: syft
@@ -260,6 +321,7 @@ jobs:
           IMAGE: ${{ steps.meta.outputs.image }}
           TAG: ${{ steps.meta.outputs.tag }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -276,6 +338,6 @@ jobs:
             echo "### ${IMAGE}:${TAG}"
             echo
             echo "- digest: \`${DIGEST}\`"
-            echo "- source: \`${GITHUB_SHA}\`"
+            echo "- source: \`${SOURCE_SHA}\`"
             echo "- signed by: \`https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml\`"
           } >>"${GITHUB_STEP_SUMMARY}"

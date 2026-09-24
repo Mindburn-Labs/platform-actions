@@ -1,0 +1,28 @@
+# Copy to .github/workflows/dependabot-auto-merge.yml, next to
+# .github/dependabot.yml. Patch and minor Dependabot PRs then merge themselves
+# when `ci / gate` is green; majors wait for an agent.
+#
+# Needs: the repository setting "Allow auto-merge" and the org ruleset that
+# requires `ci / gate` (without a required check nothing is armed).
+# Optional: MINDBURN_FLUX_APP_ID and MINDBURN_FLUX_PRIVATE_KEY stored as
+# Dependabot secrets, so the merge push runs CI on main and, where the repo
+# releases, auto-tag and the release. Without them the update lands but
+# starts no push workflow.
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependabot:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: Mindburn-Labs/platform-actions/.github/workflows/dependabot-auto-merge.yml@v2
+    secrets:
+      MINDBURN_FLUX_APP_ID: ${{ secrets.MINDBURN_FLUX_APP_ID }}
+      MINDBURN_FLUX_PRIVATE_KEY: ${{ secrets.MINDBURN_FLUX_PRIVATE_KEY }}
