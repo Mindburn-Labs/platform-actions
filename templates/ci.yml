@@ -1,0 +1,36 @@
+# Copy to .github/workflows/ci.yml. The required status check is `ci / gate`,
+# so keep the job id `ci`. Change `main` if the default branch differs.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
+    # Optional:
+    # with:
+    #   setup-commands: npm ci
+    #   extra-commands: make e2e
+    # secrets:
+    #   MINDBURN_ORG_READ_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+
+  # Repositories that ship releases: tag the default branch when CI is green.
+  # Delete this job where nothing is released.
+  tag:
+    needs: ci
+    if: github.event_name == 'push'
+    uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2
+    secrets:
+      MINDBURN_FLUX_APP_ID: ${{ secrets.MINDBURN_FLUX_APP_ID }}
+      MINDBURN_FLUX_PRIVATE_KEY: ${{ secrets.MINDBURN_FLUX_PRIVATE_KEY }}

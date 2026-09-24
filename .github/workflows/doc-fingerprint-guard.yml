@@ -1,3 +1,5 @@
+# DEPRECATED: callers move to ci.yml@v2 (see README). Kept working until the
+# last caller has migrated.
 name: Doc Fingerprint Guard
 
 # Anti-regrowth gate for the 2026-06-29 markdown estate cleanup.

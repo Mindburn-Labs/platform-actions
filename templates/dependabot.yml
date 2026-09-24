@@ -1,0 +1,102 @@
+# Copy to .github/dependabot.yml. Keep github-actions, and keep every other
+# block only if the repository has its manifest (the same detection as
+# ci.yml@v2): go.mod -> gomod; package-lock.json or pnpm-lock.yaml -> npm;
+# pyproject.toml or requirements*.txt -> pip; Gemfile -> bundler;
+# Cargo.toml -> cargo; *.tf -> terraform; Dockerfile -> docker.
+#
+# Patch and minor updates arrive as one grouped PR per ecosystem; majors come
+# one PR each. Runtime dependency updates are committed as `fix(deps)`, so
+# auto-tag.yml@v2 cuts a patch release for them; dev dependencies and actions
+# use `chore`/`ci` and release nothing.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: gomod
+    directories: ['**/*']
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: npm
+    directories: ['**/*']
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: pip
+    directories: ['**/*']
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: bundler
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: cargo
+    directories: ['**/*']
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: terraform
+    directories: ['**/*']
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]
+
+  - package-ecosystem: docker
+    directories: ['**/*']
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      patch-and-minor:
+        update-types: [patch, minor]

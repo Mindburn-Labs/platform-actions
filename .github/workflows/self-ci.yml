@@ -1,0 +1,47 @@
+# This repository's own CI: the v2 workflows called locally, so every change
+# to them runs end to end on its own pull request before `v2` moves.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      setup-commands: |
+        version=1.7.12
+        sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        archive="${RUNNER_TEMP}/actionlint.tar.gz"
+        curl --fail --silent --show-error --location --retry 3 --proto '=https' --output "${archive}" \
+          "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+        echo "${sha256}  ${archive}" | sha256sum --check --strict
+        mkdir -p "${RUNNER_TEMP}/bin"
+        tar -xzf "${archive}" -C "${RUNNER_TEMP}/bin" actionlint
+        echo "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+  auto-tag-dry-run:
+    uses: ./.github/workflows/auto-tag.yml
+    with:
+      dry-run: true
+
+  release-image-dry-run:
+    uses: ./.github/workflows/release-image.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      context: tests/fixtures/image
+      dry-run: true

@@ -1,3 +1,5 @@
+# DEPRECATED: callers move to ci.yml@v2 (see README). Kept working until the
+# last caller has migrated; it no longer runs on this repository's own PRs.
 name: AI Agent Review & Preflight
 
 on:
@@ -8,10 +10,6 @@ on:
       # gate then clones those sibling repos so `make build/test` resolves.
       MINDBURN_ORG_READ_TOKEN:
         required: false
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
 
 permissions:
   contents: read

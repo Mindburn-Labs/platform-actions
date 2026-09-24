@@ -1,0 +1,170 @@
+# Auto-tag v2: a green default branch tags itself.
+#
+# Call it from the CI workflow, after the CI job, on push only:
+#
+#   tag:
+#     needs: ci
+#     if: github.event_name == 'push'
+#     uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2
+#     secrets:
+#       MINDBURN_FLUX_APP_ID: ${{ secrets.MINDBURN_FLUX_APP_ID }}
+#       MINDBURN_FLUX_PRIVATE_KEY: ${{ secrets.MINDBURN_FLUX_PRIVATE_KEY }}
+#
+# `needs: ci` is what makes it "green": the job runs only when every CI job on
+# this exact commit passed.
+#
+# THE BUMP. The newest bare vMAJOR.MINOR.PATCH tag is the previous release.
+# Conventional commits since then decide the next one: `type!:` or a
+# `BREAKING CHANGE:` footer is major, `feat` is minor, `fix`/`perf`/`revert`
+# is patch, anything else releases nothing. With no previous release the first
+# tag is `initial-version`. Tags such as chart-v1.2.3 are ignored.
+#
+# WHY A GITHUB APP TOKEN. A tag pushed with GITHUB_TOKEN does not trigger other
+# workflows, so the tag-triggered release would never run. The push uses a
+# short-lived installation token of the `mindburn-flux` App, scoped to this
+# repository with contents:write — the same approach as app-helm-console's
+# auto-tag.yml. Without the App secrets the mint step fails loudly.
+#
+# LIGHTWEIGHT TAGS, as in app-helm-console: for an annotated tag, github.sha
+# in a tag-triggered workflow is the tag object, which older release
+# workflows in the estate treat as the commit.
+name: Auto-tag v2
+
+on:
+  workflow_call:
+    inputs:
+      dry-run:
+        description: Compute and print the next tag without minting a token or pushing.
+        type: boolean
+        default: false
+      initial-version:
+        description: Version for the first tag when the repository has no vMAJOR.MINOR.PATCH tag yet.
+        type: string
+        default: 0.1.0
+    secrets:
+      MINDBURN_FLUX_APP_ID:
+        required: false
+      MINDBURN_FLUX_PRIVATE_KEY:
+        required: false
+    outputs:
+      tag:
+        description: The tag that was pushed (or would be, in a dry run); empty when there is nothing to release.
+        value: ${{ jobs.tag.outputs.tag }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tag:
+    name: tag
+    if: inputs.dry-run || (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # One real claim at a time per repository, never cancelled halfway. Dry
+    # runs get their own group so they can never displace a pending real run.
+    concurrency:
+      group: auto-tag-${{ github.repository }}-${{ inputs.dry-run && github.run_id || 'release' }}
+      cancel-in-progress: false
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+    env:
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Mint a GitHub App installation token
+        id: app
+        if: ${{ !inputs.dry-run }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.MINDBURN_FLUX_APP_ID }}
+          private-key: ${{ secrets.MINDBURN_FLUX_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Check out the commit with full history and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          fetch-tags: true
+          # The App token becomes the push credential for `git push` below.
+          token: ${{ steps.app.outputs.token || github.token }}
+          persist-credentials: ${{ !inputs.dry-run }}
+
+      - name: Compute the next tag
+        id: next
+        env:
+          INITIAL_VERSION: ${{ inputs.initial-version }}
+        run: |
+          if [[ ! "${INITIAL_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::initial-version '${INITIAL_VERSION}' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          latest="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
+
+          if [[ -z "${latest}" ]]; then
+            next="v${INITIAL_VERSION}"
+            echo "no previous release; first tag is ${next}"
+          else
+            latest_sha="$(git rev-list -n1 "${latest}")"
+            # CI completion order is not merge order: a slow run for an older
+            # commit can finish after a newer commit was already released.
+            if git merge-base --is-ancestor "${SOURCE_SHA}" "${latest_sha}"; then
+              echo "${SOURCE_SHA:0:8} is already in ${latest}; nothing to release"
+              echo "tag=" >>"${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            # Never hand a higher number to code that lacks the newest release.
+            if ! git merge-base --is-ancestor "${latest_sha}" "${SOURCE_SHA}"; then
+              echo "::error::${SOURCE_SHA} does not contain ${latest} (${latest_sha:0:8}); refusing to tag diverged history"
+              exit 1
+            fi
+
+            subjects="$(git log --format=%s "${latest_sha}..${SOURCE_SHA}")"
+            bodies="$(git log --format=%b "${latest_sha}..${SOURCE_SHA}")"
+            if grep -Eq '^[[:alpha:]]+(\([^)]*\))?!:' <<<"${subjects}" ||
+              grep -Eq '^BREAKING[ -]CHANGE:' <<<"${bodies}"; then
+              bump="major"
+            elif grep -Eiq '^feat(\([^)]*\))?:' <<<"${subjects}"; then
+              bump="minor"
+            elif grep -Eiq '^(fix|perf|revert)(\([^)]*\))?:' <<<"${subjects}"; then
+              bump="patch"
+            else
+              echo "no feat, fix, perf, revert or breaking commit since ${latest}; nothing to release"
+              echo "tag=" >>"${GITHUB_OUTPUT}"
+              exit 0
+            fi
+
+            IFS=. read -r major minor patch <<<"${latest#v}"
+            case "${bump}" in
+              major) next="v$((major + 1)).0.0" ;;
+              minor) next="v${major}.$((minor + 1)).0" ;;
+              patch) next="v${major}.${minor}.$((patch + 1))" ;;
+            esac
+            echo "${bump} bump: ${latest} -> ${next}"
+          fi
+          echo "tag=${next}" >>"${GITHUB_OUTPUT}"
+
+      - name: Push the tag
+        if: ${{ !inputs.dry-run && steps.next.outputs.tag != '' }}
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          git tag "${TAG}" "${SOURCE_SHA}"
+          git push origin "refs/tags/${TAG}"
+          echo "::notice::pushed ${TAG} at ${SOURCE_SHA}"
+
+      - name: Summary
+        if: steps.next.outputs.tag != ''
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          if [[ "${DRY_RUN}" == true ]]; then
+            echo "dry run: would tag ${SOURCE_SHA} as ${TAG}" >>"${GITHUB_STEP_SUMMARY}"
+          else
+            echo "tagged ${SOURCE_SHA} as ${TAG}" >>"${GITHUB_STEP_SUMMARY}"
+          fi
