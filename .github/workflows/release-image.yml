@@ -1,0 +1,281 @@
+# Release image v2: a pushed v<semver> tag becomes a signed multi-arch image.
+#
+#   on:
+#     push:
+#       tags: ['v*']
+#   jobs:
+#     image:
+#       uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+#       permissions:
+#         contents: read
+#         packages: write
+#         id-token: write
+#         attestations: write
+#
+# Derived from svc-helm-control-plane/.github/workflows/release-tag-image.yml,
+# without its repository-specific contexts and smoke tests. Steps:
+#   1. The tag must be vMAJOR.MINOR.PATCH[-PRERELEASE] on a commit that is on
+#      the default branch, and must not exist in GHCR yet (tags are immutable).
+#   2. Buildx builds every platform and pushes the index by digest only, so no
+#      tag points at an image before it is signed.
+#   3. Per platform: an SPDX SBOM from syft, attached with `cosign attest`.
+#   4. `cosign sign --recursive` signs the index and each platform manifest
+#      keyless through GitHub OIDC; SLSA build provenance is attested with
+#      actions/attest-build-provenance and pushed to the registry.
+#   5. The signature is verified, then the tag is created on that digest and
+#      read back.
+#
+# Signatures are made by this reusable workflow, so the certificate identity
+# is https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@<ref>
+# (refs/tags/v2 for callers on @v2), and the GitHub Workflow Repository
+# extension is the caller repository.
+#
+# dry-run builds every platform without logging in, pushing, signing or
+# tagging, so it can run on pull requests.
+name: Release image v2
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Image name without tag. Default ghcr.io/<owner>/<repo>, lowercased.
+        type: string
+        default: ''
+      context:
+        description: Docker build context, relative to the repository root.
+        type: string
+        default: .
+      dockerfile:
+        description: Dockerfile path. Default <context>/Dockerfile.
+        type: string
+        default: ''
+      platforms:
+        description: Comma-separated target platforms.
+        type: string
+        default: linux/amd64,linux/arm64
+      build-args:
+        description: Newline-separated KEY=VALUE build arguments.
+        type: string
+        default: ''
+      tag:
+        description: Release tag. Default the pushed git tag.
+        type: string
+        default: ''
+      dry-run:
+        description: Build all platforms but do not push, sign or tag.
+        type: boolean
+        default: false
+    outputs:
+      image:
+        description: Image name without tag.
+        value: ${{ jobs.release.outputs.image }}
+      tag:
+        description: The release tag.
+        value: ${{ jobs.release.outputs.tag }}
+      digest:
+        description: Digest of the multi-arch index (empty in a dry run).
+        value: ${{ jobs.release.outputs.digest }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: build, sign, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    concurrency:
+      group: release-image-${{ github.repository }}-${{ inputs.tag || github.ref_name }}
+      cancel-in-progress: false
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve the release
+        id: meta
+        env:
+          IMAGE_INPUT: ${{ inputs.image }}
+          TAG_INPUT: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          image="${IMAGE_INPUT:-ghcr.io/${GITHUB_REPOSITORY,,}}"
+          tag="${TAG_INPUT}"
+          if [[ -z "${tag}" && "${GITHUB_REF_TYPE}" == tag ]]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "${DRY_RUN}" == true ]]; then
+            tag="${tag:-v0.0.0-dry-run}"
+          else
+            if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::'${tag}' is not a release tag (vMAJOR.MINOR.PATCH[-PRERELEASE]); push a tag or pass the tag input"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${source_sha}" "origin/${DEFAULT_BRANCH}"; then
+              echo "::error::${source_sha} is not on ${DEFAULT_BRANCH}; only merged code is released"
+              exit 1
+            fi
+            if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+              echo "::error::keyless signing needs an OIDC token; grant id-token: write on the calling job"
+              exit 1
+            fi
+          fi
+          {
+            echo "image=${image}"
+            echo "tag=${tag}"
+            echo "source_sha=${source_sha}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "releasing ${image}:${tag} from ${source_sha} (dry run: ${DRY_RUN})"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry-run }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Refuse to overwrite a published tag
+        if: ${{ !inputs.dry-run }}
+        env:
+          REF: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+        run: |
+          if existing="$(docker buildx imagetools inspect "${REF}" --format '{{.Manifest.Digest}}' 2>inspect.err)"; then
+            echo "::error::${REF} already exists at ${existing}; release tags are immutable, cut a new one"
+            exit 1
+          fi
+          if ! grep -Eiq ': not found|manifest unknown|name unknown' inspect.err; then
+            cat inspect.err >&2
+            echo "::error::could not prove that ${REF} is absent"
+            exit 1
+          fi
+          echo "${REF} is free"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          build-args: ${{ inputs.build-args }}
+          # SBOM and provenance are attached below as signed attestations;
+          # keep the index to exactly one manifest per platform.
+          provenance: false
+          sbom: false
+          outputs: ${{ inputs.dry-run && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.meta.outputs.image) }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.source_sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,scope=release-image,mode=max
+
+      - name: Verify the pushed index
+        id: index
+        if: ${{ !inputs.dry-run }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build did not report an image digest"
+            exit 1
+          fi
+          docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}" >index.json
+          # linux/arm64 and linux/arm64/v8 are the same platform; compare
+          # them without the default variant.
+          jq -r '.manifests[] | [(.platform | [.os, .architecture, .variant // empty] | join("/") | sub("^linux/arm64/v8$"; "linux/arm64")), .digest] | @tsv' \
+            index.json >platforms.tsv
+          want="$(tr ',' '\n' <<<"${PLATFORMS}" | sed 's/[[:space:]]//g; s#^linux/arm64/v8$#linux/arm64#' | sort)"
+          got="$(cut -f1 platforms.tsv | sort)"
+          if [[ "${want}" != "${got}" ]]; then
+            echo "::error::index platforms differ from the request: wanted [${want//$'\n'/ }], got [${got//$'\n'/ }]"
+            exit 1
+          fi
+          cat platforms.tsv
+
+      - name: Install syft
+        id: syft
+        if: ${{ !inputs.dry-run }}
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      - name: Install cosign
+        if: ${{ !inputs.dry-run }}
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Attest an SPDX SBOM per platform
+        if: ${{ !inputs.dry-run }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          while IFS=$'\t' read -r platform digest; do
+            sbom="sbom-${platform//\//-}.spdx.json"
+            "${SYFT}" scan "registry:${IMAGE}@${digest}" --quiet --output "spdx-json=${sbom}"
+            jq -e '.spdxVersion | startswith("SPDX-")' "${sbom}" >/dev/null
+            cosign attest --yes --type spdxjson --predicate "${sbom}" "${IMAGE}@${digest}"
+            echo "${platform}: SBOM attested to ${digest}"
+          done <platforms.tsv
+
+      - name: Sign the index and every platform manifest
+        if: ${{ !inputs.dry-run }}
+        env:
+          REF: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes --recursive "${REF}"
+
+      - name: Attest SLSA build provenance
+        if: ${{ !inputs.dry-run }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Verify the signature, then publish the tag
+        if: ${{ !inputs.dry-run }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/Mindburn-Labs/platform-actions/\.github/workflows/release-image\.yml@' \
+            --certificate-github-workflow-repository "${GITHUB_REPOSITORY}" \
+            "${IMAGE}@${DIGEST}" >/dev/null
+          docker buildx imagetools create --tag "${IMAGE}:${TAG}" "${IMAGE}@${DIGEST}"
+          published="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
+          if [[ "${published}" != "${DIGEST}" ]]; then
+            echo "::error::${IMAGE}:${TAG} resolves to ${published}, expected ${DIGEST}"
+            exit 1
+          fi
+          {
+            echo "### ${IMAGE}:${TAG}"
+            echo
+            echo "- digest: \`${DIGEST}\`"
+            echo "- source: \`${GITHUB_SHA}\`"
+            echo "- signed by: \`https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

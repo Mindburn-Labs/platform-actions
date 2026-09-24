@@ -2,14 +2,13 @@ repo_type: platform
 owners:
   team: architecture-platform
 commands:
-  setup: make setup
+  check: make check
   test: make test
   lint: make lint
-  build: make build
 risk:
   external_writes: false
   secrets_required: false
   protected_paths:
     - security/**
 agent_entrypoints:
-  default_task: make agent-context
+  default_task: make check
