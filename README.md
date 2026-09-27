@@ -109,8 +109,10 @@ Jobs:
   advisory (CVSS 7.0 or more, or rated HIGH/CRITICAL by GitHub) that the
   change adds. Inherited findings are reported as a notice and left to
   Dependabot.
-- `gate`: needs every other job, runs with `if: always()`, and fails if any of
-  them failed or was cancelled. Skipped jobs pass.
+- `gate`: needs every other job and runs with `if: always()`. `make check`
+  must succeed. Only `dependency-scan` may skip, on events other than
+  `pull_request` and `merge_group`, matching its job condition. Missing jobs,
+  other skips, failures and cancellations fail the gate.
 
 ### `auto-tag.yml`
 
