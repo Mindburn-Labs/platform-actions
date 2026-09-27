@@ -14,8 +14,8 @@
 #   dependency-scan pull requests and merge groups only: fails on a HIGH or
 #                   CRITICAL vulnerability that is present at head and absent
 #                   at base. Inherited findings are Dependabot's job.
-#   gate            needs every other job; fails if any of them failed or was
-#                   cancelled.
+#   gate            needs every other job; only dependency-scan may skip, on
+#                   events other than pull_request and merge_group.
 #
 # Scripts are inline on purpose: a reusable workflow checks out the CALLER, so
 # it cannot read helper files from this repository.
@@ -358,9 +358,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every job to succeed or be skipped
+      - name: Require success with explicit skip policy
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          : "${EVENT_NAME:?GitHub event is required for the skip policy}"
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${NEEDS}"
-          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"${NEEDS}" >/dev/null
+          jq -e --arg event "${EVENT_NAME}" '
+            has("check") and has("dependency-scan")
+            and .check.result == "success"
+            and all(to_entries[];
+              .value.result == "success"
+              or (.key == "dependency-scan" and .value.result == "skipped"
+                  and $event != "pull_request" and $event != "merge_group")
+            )
+          ' <<<"${NEEDS}" >/dev/null
