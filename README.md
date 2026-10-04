@@ -32,6 +32,10 @@ Every repository:
 ```yaml
 jobs:
   ci:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
 ```
 
@@ -43,6 +47,10 @@ one run:
 ```yaml
 jobs:
   ci:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
   tag:
     needs: ci
@@ -89,6 +97,12 @@ To keep one definition, make that file both tag-triggered and
 with `uses: ./.github/workflows/<file>.yml` and `secrets: inherit`.
 
 ### `ci.yml`
+
+The calling `ci` job grants `contents: read`, `actions: read`, and
+`pull-requests: read`. The reusable workflow keeps those read permissions
+available to `make check` and its setup/extra commands for Actions evidence
+and pull request provenance checks. GitHub does not let a reusable workflow
+raise the caller's token permissions.
 
 | Input / secret | Default | Meaning |
 | --- | --- | --- |

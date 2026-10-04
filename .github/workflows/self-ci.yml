@@ -17,6 +17,10 @@ concurrency:
 
 jobs:
   ci:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     uses: ./.github/workflows/ci.yml
     with:
       setup-commands: |
