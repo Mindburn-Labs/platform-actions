@@ -11,6 +11,13 @@ checks are the only thing that stops a change.
 
 ## The v2 contract
 
+Setup commands run with the reusable job's short-lived `GH_TOKEN`, constrained
+by the caller and callee read permissions. Use that environment variable for
+authenticated GitHub reads. Do not interpolate `github.token` into the caller's
+`with.setup-commands`: no job token exists in that context. Checkout still does
+not persist Git credentials; a subsequent private Git fetch uses a command-local
+credential helper.
+
 Every repository:
 
 1. has a `make check` target that runs its real gates (lint, typecheck, tests,
