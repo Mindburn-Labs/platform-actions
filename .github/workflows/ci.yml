@@ -260,6 +260,9 @@ jobs:
         if: inputs.setup-commands != ''
         env:
           COMMANDS: ${{ inputs.setup-commands }}
+          # The caller's `with` context has no job token yet. Bind the
+          # short-lived read token here, after this reusable job has started.
+          GH_TOKEN: ${{ github.token }}
         run: eval "${COMMANDS}"
 
       - name: make check
