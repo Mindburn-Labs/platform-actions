@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -70,6 +71,41 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repo, capture_output=True, text=True, check=True
     ).stdout.strip()
+
+
+class ReleaseSignatureIdentityTest(unittest.TestCase):
+    SCRIPT = step_script("release-image.yml", "Verify the signature, then publish the tag")
+    BASE = (
+        "https://github.com/Mindburn-Labs/platform-actions/"
+        ".github/workflows/release-image.yml@"
+    )
+
+    def test_only_complete_v2_tag_refs_are_accepted(self) -> None:
+        match = re.search(r"--certificate-identity-regexp '([^']+)'", self.SCRIPT)
+        self.assertIsNotNone(match)
+        pattern = re.compile(match.group(1))
+        for ref in ("refs/tags/v2", "refs/tags/v2.1.0"):
+            with self.subTest(ref=ref):
+                self.assertIsNotNone(pattern.search(self.BASE + ref))
+        for identity in (
+            self.BASE + "refs/heads/main",
+            self.BASE + "refs/tags/v2-evil",
+            self.BASE + "refs/tags/v2.1.0-extra",
+            self.BASE + "refs/tags/v2.1.0/evil",
+            self.BASE + "refs/tags/v3",
+            self.BASE.replace("release-image.yml", "release-image-evil.yml")
+            + "refs/tags/v2",
+        ):
+            with self.subTest(identity=identity):
+                self.assertIsNone(pattern.search(identity))
+        self.assertIn(
+            "--certificate-oidc-issuer https://token.actions.githubusercontent.com",
+            self.SCRIPT,
+        )
+        self.assertIn(
+            '--certificate-github-workflow-repository "${GITHUB_REPOSITORY}"',
+            self.SCRIPT,
+        )
 
 
 class AutoTagTest(unittest.TestCase):

@@ -163,8 +163,9 @@ through GitHub OIDC; `actions/attest-build-provenance` adds SLSA provenance;
 then the signature is verified and the tag is created on that digest.
 `verify-commands` runs against the pushed digest before the SBOM, signature
 and tag, so a failed smoke test leaves no tag behind. A tag
-that already exists in GHCR is never overwritten. The certificate identity is
-`https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@refs/tags/v2`.
+that already exists in GHCR is never overwritten. Signature verification
+accepts the exact reusable-workflow identity at `refs/tags/v2` or an immutable
+`refs/tags/v2.x.y` tag, with the caller repository bound separately.
 
 | Input | Default | Meaning |
 | --- | --- | --- |

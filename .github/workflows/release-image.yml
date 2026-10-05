@@ -37,8 +37,8 @@
 #
 # Signatures are made by this reusable workflow, so the certificate identity
 # is https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@<ref>
-# (refs/tags/v2 for callers on @v2), and the GitHub Workflow Repository
-# extension is the caller repository.
+# (refs/tags/v2 for callers on @v2, or an immutable v2.x.y tag), and the
+# GitHub Workflow Repository extension is the caller repository.
 #
 # dry-run builds every platform without logging in, pushing, signing or
 # tagging, so it can run on pull requests.
@@ -325,7 +325,7 @@ jobs:
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp '^https://github\.com/Mindburn-Labs/platform-actions/\.github/workflows/release-image\.yml@' \
+            --certificate-identity-regexp '^https://github\.com/Mindburn-Labs/platform-actions/\.github/workflows/release-image\.yml@refs/tags/v2(\.[0-9]+\.[0-9]+)?$' \
             --certificate-github-workflow-repository "${GITHUB_REPOSITORY}" \
             "${IMAGE}@${DIGEST}" >/dev/null
           docker buildx imagetools create --tag "${IMAGE}:${TAG}" "${IMAGE}@${DIGEST}"
