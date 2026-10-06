@@ -8,12 +8,12 @@
 #     if: github.event_name == 'push'
 #     permissions:
 #       contents: write
-#     uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2
+#     uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2.0.1
 #   image:
 #     needs: tag
 #     if: needs.tag.outputs.tag != ''
 #     permissions: {contents: read, packages: write, id-token: write, attestations: write}
-#     uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+#     uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2.0.1
 #     with:
 #       tag: ${{ needs.tag.outputs.tag }}
 #

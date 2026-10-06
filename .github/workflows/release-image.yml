@@ -8,7 +8,7 @@
 #       tags: ['v*']
 #   jobs:
 #     image:
-#       uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+#       uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2.0.1
 #       permissions:
 #         contents: read
 #         packages: write
@@ -37,7 +37,7 @@
 #
 # Signatures are made by this reusable workflow, so the certificate identity
 # is https://github.com/Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@<ref>
-# (refs/tags/v2 for callers on @v2, or an immutable v2.x.y tag), and the
+# (refs/tags/v2 for legacy callers on @v2, or an immutable v2.x.y tag), and the
 # GitHub Workflow Repository extension is the caller repository.
 #
 # dry-run builds every platform without logging in, pushing, signing or

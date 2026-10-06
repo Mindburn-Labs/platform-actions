@@ -24,7 +24,7 @@ Every repository:
    build; for docs or config repos, whatever validates them). A target that
    only echoes is a defect.
 2. copies [`templates/ci.yml`](templates/ci.yml) to `.github/workflows/ci.yml`.
-   It calls `ci.yml@v2` on `pull_request`, `push` to the default branch and
+   It calls `ci.yml@v2.0.1` on `pull_request`, `push` to the default branch and
    `merge_group`, with no path filters.
 3. requires one status check, `ci / gate` (the caller job id is `ci`, the
    reusable job is `gate`), through the org ruleset.
@@ -33,8 +33,9 @@ Every repository:
    copies [`templates/dependabot-auto-merge.yml`](templates/dependabot-auto-merge.yml)
    to `.github/workflows/` so patch and minor updates merge themselves on a
    green `ci / gate`.
-5. pins `@v2`. `v2` is a moving major tag: compatible changes move it,
-   breaking changes become `v3`.
+5. pins a protected full-version tag, currently `@v2.0.1`. Existing `@v2`
+   callers migrate through reviewed PRs. New compatible versions receive a
+   new `v2.x.y` tag; a breaking contract change receives a new major version.
 
 ```yaml
 jobs:
@@ -43,7 +44,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
-    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
+    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2.0.1
 ```
 
 Repositories that release keep the `tag` and `image` jobs of
@@ -58,13 +59,13 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
-    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2
+    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2.0.1
   tag:
     needs: ci
     if: github.event_name == 'push'
     permissions:
       contents: write
-    uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2
+    uses: Mindburn-Labs/platform-actions/.github/workflows/auto-tag.yml@v2.0.1
   image:
     needs: tag
     if: needs.tag.outputs.tag != ''
@@ -73,7 +74,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+    uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2.0.1
     with:
       tag: ${{ needs.tag.outputs.tag }}
 ```
@@ -91,7 +92,7 @@ permissions:
   contents: read
 jobs:
   image:
-    uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2
+    uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2.0.1
     permissions:
       contents: read
       packages: write
@@ -201,8 +202,8 @@ auto-merge".
 ### Deprecated
 
 `agent-preflight.yml` and `doc-fingerprint-guard.yml` are deprecated in favour
-of `ci.yml@v2`. They keep working for the repositories that still call them
-until those move to v2. `production-readiness.yml` has no known callers.
+of `ci.yml@v2.0.1`. They keep working for repositories that still call them
+until those callers migrate. `production-readiness.yml` has no known callers.
 
 ## Repository layout
 

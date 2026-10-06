@@ -2,8 +2,9 @@
 
 Reusable GitHub Actions workflows that other Mindburn repos call through
 `workflow_call`. The v2 set is `ci.yml`, `auto-tag.yml` and
-`release-image.yml`; callers pin `@v2`, a moving major tag, so a change here
-reaches every caller when `v2` moves. `agent-preflight.yml`,
+`release-image.yml`. New callers pin the protected full-version tag
+`@v2.0.1`; existing `@v2` callers remain on that legacy ref until their
+workflows migrate. `agent-preflight.yml`,
 `doc-fingerprint-guard.yml` and `production-readiness.yml` are deprecated and
 kept for their remaining callers.
 
@@ -17,9 +18,12 @@ kept for their remaining callers.
   copy in `agent-preflight.yml`. Edit both together.
 
 ## Releasing
-* After a compatible change merges, move `v2` to the merge commit:
-  `git tag -fa v2 -m "v2: <summary>" <sha> && git push -f origin refs/tags/v2`.
-  A breaking change to an input, secret, output or job name becomes `v3`.
+* After a compatible workflow change merges and passes its gate, cut a new annotated
+  `v2.x.y` tag at the merge commit, then verify its remote tag object and
+  peeled commit. Update callers through reviewed PRs to the new full-version
+  ref. Preserve published tags, including legacy `v2`; never force-move them.
+  A breaking input, secret, output or job-name change requires a new major
+  release and explicit caller migration.
 
 ## Architectural Boundaries
 * Workflow scripts stay inline: a reusable workflow checks out the caller, not
