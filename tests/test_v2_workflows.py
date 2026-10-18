@@ -334,6 +334,89 @@ class DependabotAutoMergeTest(unittest.TestCase):
         self.assertIn("no required status check", result.stdout)
 
 
+class ReleaseReadinessTargetTest(unittest.TestCase):
+    SCRIPT = step_script("ci.yml", "Identify exact promotion target")
+
+    def classify(self, changed_path: str, branch: str, *, base_sha: str | None = None,
+                 event: str = "pull_request",
+                 head_repository: str = "Mindburn-Labs/gitops-platform") -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root / "candidate"
+            candidate.mkdir()
+            git(candidate, "init", "-q")
+            git(candidate, "config", "user.email", "readiness-test@example.invalid")
+            git(candidate, "config", "user.name", "Readiness Test")
+            for name in ("README.md", "clusters/staging-do/pin.yaml", "clusters/production-do/pin.yaml"):
+                path = candidate / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("base\n", encoding="utf-8")
+            git(candidate, "add", ".")
+            git(candidate, "commit", "-qm", "base")
+            base = git(candidate, "rev-parse", "HEAD")
+            (candidate / changed_path).write_text("changed\n", encoding="utf-8")
+            git(candidate, "add", ".")
+            git(candidate, "commit", "-qm", "candidate")
+            head = git(candidate, "rev-parse", "HEAD")
+            output = root / "output"
+            result = run_bash(self.SCRIPT, root, {
+                "EVENT_NAME": event, "HEAD_REF": branch,
+                "HEAD_REPOSITORY": head_repository,
+                "BASE_REF": "main", "DEFAULT_BRANCH": "main",
+                "BASE_SHA": base_sha or base, "CANDIDATE_SHA": head,
+                "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "GITHUB_OUTPUT": str(output),
+            })
+            return result.returncode, output.read_text() if output.exists() else "", result.stderr + result.stdout
+
+    def test_regular_source_pr_passes_with_no_target(self) -> None:
+        code, output, message = self.classify("README.md", "feature/readme")
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\n")
+
+    def test_non_promotion_branch_cannot_change_target_cluster(self) -> None:
+        code, _, message = self.classify("clusters/staging-do/pin.yaml", "feature/staging-pin")
+        self.assertNotEqual(code, 0)
+        self.assertIn("target cluster changes require", message)
+
+    def test_unusual_filename_cannot_hide_target_change(self) -> None:
+        code, _, message = self.classify("clusters/staging-do/odd\npin.yaml", "feature/staging-pin")
+        self.assertNotEqual(code, 0)
+        self.assertIn("target cluster changes require", message)
+
+    def test_matching_promotion_branch_produces_exact_target(self) -> None:
+        code, output, message = self.classify("clusters/staging-do/pin.yaml", "promote/staging-cp-v1")
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=staging-do\n")
+
+    def test_other_target_on_promotion_branch_fails(self) -> None:
+        code, _, message = self.classify("clusters/production-do/pin.yaml", "promote/staging-cp-v1")
+        self.assertNotEqual(code, 0)
+        self.assertIn("unrelated path", message)
+
+    def test_merge_group_classifies_target_with_unusual_filename(self) -> None:
+        code, output, message = self.classify("clusters/staging-do/odd\npin.yaml", "", event="merge_group")
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=staging-do\n")
+
+    def test_failed_diff_cannot_look_like_empty_target(self) -> None:
+        code, _, message = self.classify("README.md", "feature/readme", base_sha="0" * 40)
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot classify changed cluster paths", message)
+
+    def test_fork_promotion_fails(self) -> None:
+        code, _, message = self.classify("clusters/staging-do/pin.yaml", "promote/staging-cp-v1",
+                                         head_repository="Mindburn-Labs/other-repository")
+        self.assertNotEqual(code, 0)
+        self.assertIn("must originate in this repository", message)
+
+    def test_readiness_job_is_scheduled_for_every_gitops_pr(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        job = workflow.split("  release-readiness:\n", 1)[1].split("  dependency-scan:\n", 1)[0]
+        self.assertIn("github.event_name == 'merge_group' || github.event_name == 'pull_request'", job)
+        self.assertNotIn("startsWith(github.event.pull_request.head.ref", job)
+
+
 class GateTest(unittest.TestCase):
     SCRIPT = step_script("ci.yml", "Require success with explicit skip policy")
 
@@ -371,9 +454,10 @@ class GateTest(unittest.TestCase):
                             result = self.gate(event, **{"check": check, "dependency-scan": scan, "release-readiness": readiness})
                             self.assertEqual(result == 0, allowed)
 
-    def test_gitops_promotion_and_merge_queue_require_readiness(self) -> None:
+    def test_every_gitops_pr_and_merge_queue_require_readiness(self) -> None:
         base = {"check": "success", "dependency-scan": "success"}
-        for event, head in (("pull_request", "promote/staging-cp-v1"), ("pull_request", "promote/production-cp-v1"), ("merge_group", "")):
+        for event, head in (("pull_request", "feature/staging-pin"), ("pull_request", "promote/staging-cp-v1"),
+                            ("pull_request", "promote/production-cp-v1"), ("merge_group", "")):
             for readiness in ("success", "failure", "cancelled", "skipped"):
                 with self.subTest(event=event, head=head, readiness=readiness):
                     result = self.gate(event, repo="Mindburn-Labs/gitops-platform", head=head,
