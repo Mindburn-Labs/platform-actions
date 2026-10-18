@@ -337,27 +337,52 @@ class DependabotAutoMergeTest(unittest.TestCase):
 class GateTest(unittest.TestCase):
     SCRIPT = step_script("ci.yml", "Require success with explicit skip policy")
 
-    def gate(self, event: str = "pull_request", **results: str) -> int:
+    def gate(
+        self,
+        event: str = "pull_request",
+        repo: str = "Mindburn-Labs/platform-actions",
+        head: str = "feature/test",
+        **results: str,
+    ) -> int:
         needs = {job: {"result": result, "outputs": {}} for job, result in results.items()}
         with tempfile.TemporaryDirectory() as tmp:
             return run_bash(
-                self.SCRIPT, Path(tmp), {"NEEDS": json.dumps(needs), "EVENT_NAME": event}
+                self.SCRIPT,
+                Path(tmp),
+                {
+                    "NEEDS": json.dumps(needs),
+                    "EVENT_NAME": event,
+                    "REPOSITORY": repo,
+                    "HEAD_REF": head,
+                },
             ).returncode
 
     def test_event_and_result_matrix(self) -> None:
         for event in ("pull_request", "merge_group", "push", "workflow_dispatch", "repository_dispatch", "schedule"):
             for check in ("success", "failure", "cancelled", "skipped"):
                 for scan in ("success", "failure", "cancelled", "skipped"):
-                    with self.subTest(event=event, check=check, scan=scan):
-                        allowed = check == "success" and (
-                            scan == "success"
-                            or (scan == "skipped" and event not in ("pull_request", "merge_group"))
-                        )
-                        result = self.gate(event, **{"check": check, "dependency-scan": scan})
-                        self.assertEqual(result == 0, allowed)
+                    for readiness in ("success", "failure", "cancelled", "skipped"):
+                        with self.subTest(event=event, check=check, scan=scan, readiness=readiness):
+                            allowed = (
+                                check == "success"
+                                and (scan == "success" or (scan == "skipped" and event not in ("pull_request", "merge_group")))
+                                and readiness in ("success", "skipped")
+                            )
+                            result = self.gate(event, **{"check": check, "dependency-scan": scan, "release-readiness": readiness})
+                            self.assertEqual(result == 0, allowed)
+
+    def test_gitops_promotion_and_merge_queue_require_readiness(self) -> None:
+        base = {"check": "success", "dependency-scan": "success"}
+        for event, head in (("pull_request", "promote/staging-cp-v1"), ("pull_request", "promote/production-cp-v1"), ("merge_group", "")):
+            for readiness in ("success", "failure", "cancelled", "skipped"):
+                with self.subTest(event=event, head=head, readiness=readiness):
+                    result = self.gate(event, repo="Mindburn-Labs/gitops-platform", head=head,
+                                       **{**base, "release-readiness": readiness})
+                    self.assertEqual(result == 0, readiness == "success")
 
     def test_missing_required_job_fails(self) -> None:
-        for results in ({}, {"check": "success"}, {"dependency-scan": "success"}):
+        for results in ({}, {"check": "success"}, {"dependency-scan": "success"},
+                        {"check": "success", "dependency-scan": "skipped"}):
             with self.subTest(results=results):
                 self.assertNotEqual(self.gate("push", **results), 0)
 
@@ -365,12 +390,12 @@ class GateTest(unittest.TestCase):
         for result in ("success", "failure", "cancelled", "skipped", "unknown"):
             with self.subTest(result=result):
                 code = self.gate(
-                    "push", **{"check": "success", "dependency-scan": "skipped", "new-job": result}
+                    "push", **{"check": "success", "dependency-scan": "skipped", "release-readiness": "skipped", "new-job": result}
                 )
                 self.assertEqual(code == 0, result == "success")
 
     def test_missing_event_fails(self) -> None:
-        self.assertNotEqual(self.gate("", **{"check": "success", "dependency-scan": "skipped"}), 0)
+        self.assertNotEqual(self.gate("", **{"check": "success", "dependency-scan": "skipped", "release-readiness": "skipped"}), 0)
 
 
 class DetectToolchainsTest(unittest.TestCase):

@@ -15,6 +15,9 @@
 #
 # Jobs:
 #   check           toolchains detected from the repository, then `make check`.
+#   release-readiness  exact GitOps promotion candidate, from trusted base code
+#                     and source-owned signed evidence; no candidate code runs
+#                     with the read-only cross-repository token.
 #   dependency-scan pull requests and merge groups only: fails on a HIGH or
 #                   CRITICAL vulnerability that is present at head and absent
 #                   at base. Inherited findings are Dependabot's job.
@@ -39,9 +42,9 @@ on:
     secrets:
       MINDBURN_ORG_READ_TOKEN:
         description: >-
-          Optional. Needed only when a go.mod uses `replace ... => ../<repo>`:
-          the check job then clones those sibling repositories next to the
-          checkout.
+          Optional for ordinary repositories. GitOps promotion readiness needs
+          read access to helm-rollout-evidence and the producer Actions APIs.
+          A go.mod with replace directives also uses it for sibling clones.
         required: false
 
 permissions:
@@ -279,6 +282,97 @@ jobs:
           COMMANDS: ${{ inputs.extra-commands }}
         run: eval "${COMMANDS}"
 
+  release-readiness:
+    name: release readiness
+    if: >-
+      github.repository == 'Mindburn-Labs/gitops-platform' &&
+      (github.event_name == 'merge_group' ||
+       (github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'promote/')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out trusted base evaluator and policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          path: gate
+          persist-credentials: false
+      - name: Check out proposed cluster data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+      - name: Identify exact promotion target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          [[ "$(git -C candidate rev-parse HEAD)" == "${CANDIDATE_SHA}" ]] || exit 1
+          if [[ "${EVENT_NAME}" == pull_request ]]; then
+            [[ "${HEAD_REPOSITORY}" == "${GITHUB_REPOSITORY}" && "${BASE_REF}" == "${DEFAULT_BRANCH}" ]] || {
+              echo "::error::promotion PR must originate in this repository and target the default branch"; exit 1;
+            }
+            case "${HEAD_REF}" in
+              promote/staging-*) target=staging-do ;;
+              promote/production-*) target=production-do ;;
+              *) echo "::error::unknown promotion target"; exit 1 ;;
+            esac
+            mapfile -t changed < <(git -C candidate diff --name-only "${BASE_SHA}...${CANDIDATE_SHA}")
+            [[ "${#changed[@]}" -gt 0 ]] || { echo "::error::empty promotion PR"; exit 1; }
+            for path in "${changed[@]}"; do
+              [[ "${path}" == "clusters/${target}/"* ]] || {
+                echo "::error::promotion PR changed an unrelated path: ${path}"; exit 1;
+              }
+            done
+            printf 'targets=%s\n' "${target}" >>"${GITHUB_OUTPUT}"
+          else
+            merge_changed="$(git -C candidate diff --name-only "${BASE_SHA}" "${CANDIDATE_SHA}")"
+            targets=()
+            if grep -q '^clusters/staging-do/' <<<"${merge_changed}"; then targets+=(staging-do); fi
+            if grep -q '^clusters/production-do/' <<<"${merge_changed}"; then targets+=(production-do); fi
+            printf 'targets=%s\n' "${targets[*]}" >>"${GITHUB_OUTPUT}"
+          fi
+      - name: Read source-owned evidence
+        if: steps.target.outputs.targets != ''
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Mindburn-Labs/helm-rollout-evidence
+          token: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+          path: evidence
+          persist-credentials: false
+      - name: Evaluate every touched environment
+        env:
+          GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          TARGETS: ${{ steps.target.outputs.targets }}
+        run: |
+          [[ -n "${TARGETS}" ]] || { echo "no promotion environment changed"; exit 0; }
+          rc=0
+          read -r -a targets <<<"${TARGETS}"
+          for target in "${targets[@]}"; do
+            ruby gate/scripts/release-readiness.rb \
+              --repo candidate --policy-repo gate --evidence evidence \
+              --env "${target}" --sha "${CANDIDATE_SHA}" \
+              --output "${RUNNER_TEMP}/release-readiness-${target}.json" || rc=1
+          done
+          exit "${rc}"
+      - name: Retain machine verdicts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-readiness-verdicts
+          path: ${{ runner.temp }}/release-readiness-*.json
+          if-no-files-found: ignore
+
   dependency-scan:
     name: dependency scan
     if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -363,7 +457,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [check, dependency-scan]
+    needs: [check, dependency-scan, release-readiness]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -371,15 +465,23 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           : "${EVENT_NAME:?GitHub event is required for the skip policy}"
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${NEEDS}"
-          jq -e --arg event "${EVENT_NAME}" '
-            has("check") and has("dependency-scan")
+          jq -e --arg event "${EVENT_NAME}" --arg repo "${REPOSITORY}" --arg head "${HEAD_REF}" '
+            def readiness_required:
+              $repo == "Mindburn-Labs/gitops-platform"
+              and ($event == "merge_group" or ($event == "pull_request" and ($head | startswith("promote/"))));
+            has("check") and has("dependency-scan") and has("release-readiness")
             and .check.result == "success"
+            and (if readiness_required then .["release-readiness"].result == "success"
+                 else .["release-readiness"].result == "success" or .["release-readiness"].result == "skipped" end)
             and all(to_entries[];
               .value.result == "success"
               or (.key == "dependency-scan" and .value.result == "skipped"
                   and $event != "pull_request" and $event != "merge_group")
+              or (.key == "release-readiness" and .value.result == "skipped" and (readiness_required | not))
             )
           ' <<<"${NEEDS}" >/dev/null
