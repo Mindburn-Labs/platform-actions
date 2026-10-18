@@ -15,9 +15,10 @@
 #
 # Jobs:
 #   check           toolchains detected from the repository, then `make check`.
-#   release-readiness  exact GitOps promotion candidate, from trusted base code
-#                     and source-owned signed evidence; no candidate code runs
-#                     with the read-only cross-repository token.
+#   release-readiness  exact GitOps promotion or a frozen staging operation.
+#                     Promotion uses the verified default-main evaluator and source-owned
+#                     signed evidence. Finite operations use independently
+#                     resolved default-main policy and no org read token.
 #   dependency-scan pull requests and merge groups only: fails on a HIGH or
 #                   CRITICAL vulnerability that is present at head and absent
 #                   at base. Inherited findings are Dependabot's job.
@@ -290,7 +291,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Check out trusted base evaluator and policy
+      - name: Resolve actual default-main operation policy
+        id: policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "${GITHUB_REPOSITORY}" == Mindburn-Labs/gitops-platform ]] || exit 1
+          branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          [[ "${branch}" == main && "${EVENT_DEFAULT_BRANCH}" == "${branch}" ]] || {
+            echo "::error::default branch changed or is not main"; exit 1;
+          }
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha')"
+          [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::cannot resolve actual default-main policy commit"; exit 1;
+          }
+          printf 'sha=%s\n' "${sha}" >>"${GITHUB_OUTPUT}"
+      - name: Check out actual default-main operation policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.policy.outputs.sha }}
+          fetch-depth: 0
+          path: trusted
+          persist-credentials: false
+      - name: Verify current default-main policy checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POLICY_SHA: ${{ steps.policy.outputs.sha }}
+        run: |
+          [[ "$(git -C trusted rev-parse HEAD)" == "${POLICY_SHA}" ]] || {
+            echo "::error::operation policy checkout differs from resolved main"; exit 1;
+          }
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${current_sha}" == "${POLICY_SHA}" ]] || {
+            echo "::error::default main moved during policy checkout"; exit 1;
+          }
+      - name: Check out event diff base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -309,12 +345,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          POLICY_SHA: ${{ steps.policy.outputs.sha }}
         run: |
           [[ "$(git -C candidate rev-parse HEAD)" == "${CANDIDATE_SHA}" ]] || exit 1
+          if [[ "${EVENT_NAME}" == merge_group ]]; then
+            [[ "${DEFAULT_BRANCH}" == main && "${BASE_REF}" == refs/heads/main ]] || {
+              echo "::error::merge group must target actual default main"; exit 1;
+            }
+          fi
           changed_file="$(mktemp)"
           # Show both sides of a move so deleting a target-cluster file cannot
           # be hidden by a destination outside that cluster.
@@ -336,11 +378,53 @@ jobs:
               clusters/production-do/*) targets+=(production-do) ;;
             esac
           done
+          unique_targets=()
+          for target in "${targets[@]}"; do
+            if [[ " ${unique_targets[*]} " != *" ${target} "* ]]; then unique_targets+=("${target}"); fi
+          done
+          validate_typed_operation() {
+            local output
+            if output="$(ruby trusted/scripts/validate-readiness-operation.rb \
+                --policy-repo trusted --diff-base-repo gate --candidate-repo candidate \
+                --policy-sha "${POLICY_SHA}" --diff-base-sha "${BASE_SHA}" \
+                --candidate-sha "${CANDIDATE_SHA}" --event "${EVENT_NAME}" \
+                --head-ref "${HEAD_REF}" --head-repository "${HEAD_REPOSITORY}" \
+                --repository "${GITHUB_REPOSITORY}" --base-ref "${BASE_REF}" \
+                --default-branch "${DEFAULT_BRANCH}" \
+                --record "${RUNNER_TEMP}/typed-operation.json" \
+                2>"${RUNNER_TEMP}/typed-operation-attempt.log")"; then
+              case "${output}" in
+                credential-preparation|diagnostic-readback) ;;
+                *) echo "::error::trusted operation validator returned an unknown kind"; return 1 ;;
+              esac
+              jq -e --arg kind "${output}" --arg policy "${POLICY_SHA}" \
+                --arg base "${BASE_SHA}" --arg candidate "${CANDIDATE_SHA}" \
+                '.schema == "gitops-readiness-operation-validation-v1" and
+                 .status == "VALIDATED" and .kind == $kind and
+                 .policyCommitSha == $policy and .diffBaseSha == $base and
+                 .candidateSha == $candidate and
+                 .servingChange == false and .environmentReadinessAssessed == false and
+                 .productAccepted == false' "${RUNNER_TEMP}/typed-operation.json" >/dev/null || {
+                echo "::error::trusted operation validator returned an invalid record"; return 1;
+              }
+              printf 'targets=\noperation_kind=%s\n' "${output}" >>"${GITHUB_OUTPUT}"
+              return 0
+            fi
+            return 1
+          }
           if [[ "${EVENT_NAME}" == pull_request ]]; then
             if [[ "${HEAD_REF}" == promote/* || "${#targets[@]}" -gt 0 ]]; then
               [[ "${HEAD_REPOSITORY}" == "${GITHUB_REPOSITORY}" && "${BASE_REF}" == "${DEFAULT_BRANCH}" ]] || {
                 echo "::error::promotion PR must originate in this repository and target the default branch"; exit 1;
               }
+              if [[ "${HEAD_REF}" != promote/* && "${unique_targets[*]}" == staging-do ]]; then
+                validate_typed_operation || {
+                  cat "${RUNNER_TEMP}/typed-operation-attempt.log"
+                  echo "::error::target cluster changes require an exact reviewed operation or a promote branch"
+                  exit 1
+                }
+                exit 0
+              fi
               case "${HEAD_REF}" in
                 promote/staging-*) target=staging-do ;;
                 promote/production-*) target=production-do ;;
@@ -357,10 +441,12 @@ jobs:
               printf 'targets=\n' >>"${GITHUB_OUTPUT}"
             fi
           else
-            unique_targets=()
-            for target in "${targets[@]}"; do
-              if [[ " ${unique_targets[*]} " != *" ${target} "* ]]; then unique_targets+=("${target}"); fi
-            done
+            if [[ "${unique_targets[*]}" == staging-do ]]; then
+              if validate_typed_operation; then
+                exit 0
+              fi
+              echo "merge-group change is outside the finite operation permits; evaluating full readiness"
+            fi
             printf 'targets=%s\n' "${unique_targets[*]}" >>"${GITHUB_OUTPUT}"
           fi
       - name: Read source-owned evidence
@@ -372,18 +458,23 @@ jobs:
           token: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
           path: evidence
           persist-credentials: false
+      - name: Record bounded operation outcome
+        if: steps.target.outputs.operation_kind != ''
+        env:
+          OPERATION_KIND: ${{ steps.target.outputs.operation_kind }}
+        run: echo "${OPERATION_KIND} validated; environment readiness and product acceptance were not assessed"
       - name: Evaluate every touched environment
+        if: steps.target.outputs.targets != ''
         env:
           GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           TARGETS: ${{ steps.target.outputs.targets }}
         run: |
-          [[ -n "${TARGETS}" ]] || { echo "no promotion environment changed"; exit 0; }
           rc=0
           read -r -a targets <<<"${TARGETS}"
           for target in "${targets[@]}"; do
-            ruby gate/scripts/release-readiness.rb \
-              --repo candidate --policy-repo gate --evidence evidence \
+            ruby trusted/scripts/release-readiness.rb \
+              --repo candidate --policy-repo trusted --evidence evidence \
               --env "${target}" --sha "${CANDIDATE_SHA}" \
               --output "${RUNNER_TEMP}/release-readiness-${target}.json" || rc=1
           done
@@ -395,6 +486,13 @@ jobs:
           name: release-readiness-verdicts
           path: ${{ runner.temp }}/release-readiness-*.json
           if-no-files-found: ignore
+      - name: Retain bounded operation validation
+        if: steps.target.outputs.operation_kind != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gitops-typed-operation-validation
+          path: ${{ runner.temp }}/typed-operation.json
+          if-no-files-found: error
 
   dependency-scan:
     name: dependency scan
