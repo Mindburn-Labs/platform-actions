@@ -343,8 +343,10 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                  head_repository: str = "Mindburn-Labs/gitops-platform",
                  changed_paths: tuple[str, ...] | None = None,
                  typed_kind: str = "", invalid_record: bool = False,
+                 website_kind: str = "", invalid_website_record: bool = False,
                  base_ref: str | None = None,
-                 return_argv: bool = False) -> tuple[int, str, str] | tuple[int, str, str, dict]:
+                 return_argv: bool = False,
+                 return_website_argv: bool = False) -> tuple[int, str, str] | tuple[int, str, str, dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = root / "candidate"
@@ -402,8 +404,50 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                 "puts kind\n",
                 encoding="utf-8",
             )
+            website_script = root / "trusted" / "scripts" / "validate-website-operation.rb"
+            website_script.write_text(
+                "require 'json'\n"
+                "inspect = ARGV.delete('--inspect-local')\n"
+                "args = ARGV.each_slice(2).to_h\n"
+                "File.write(ENV.fetch('WEBSITE_VALIDATOR_LOG'), JSON.generate(args))\n"
+                "kind = ENV.fetch('WEBSITE_STUB_KIND')\n"
+                "if kind.empty?\n"
+                "  warn '::error::website operation refused: fixture'\n"
+                "  exit 1\n"
+                "end\n"
+                "if inspect\n"
+                "  if ENV['INVALID_WEBSITE_RECORD'] == 'true'\n"
+                "    warn '::error::website operation refused: invalid local match'\n"
+                "    exit 1\n"
+                "  end\n"
+                "  puts kind\n"
+                "  exit 0\n"
+                "end\n"
+                "effect = case kind\n"
+                "  when 'origin-secret-projection' then 'secret-projection'\n"
+                "  when 'r2-prerequisite-apply' then 'provider-mutation'\n"
+                "  when 'website-public-release' then 'public-serving'\n"
+                "  else 'unknown'\n"
+                "end\n"
+                "record = {'schema' => 'gitops-website-operation-validation-v1',\n"
+                "  'status' => 'VALIDATED', 'target' => 'existing-public-website',\n"
+                "  'environment' => 'staging-do', 'kind' => kind, 'effect' => effect,\n"
+                "  'operationDigest' => 'sha256:' + 'a' * 64,\n"
+                "  'receipts' => {'source' => {'sha256' => 'b' * 64}, 'operator' => {'sha256' => 'c' * 64}},\n"
+                "  'policyCommitSha' => args.fetch('--policy-sha'),\n"
+                "  'diffBaseSha' => args.fetch('--diff-base-sha'),\n"
+                "  'candidateSha' => args.fetch('--candidate-sha'),\n"
+                "  'servingChange' => effect == 'public-serving',\n"
+                "  'runtimeMutation' => ['provider-mutation', 'public-serving'].include?(effect),\n"
+                "  'environmentReadinessAssessed' => false,\n"
+                "  'productAccepted' => ENV['INVALID_WEBSITE_RECORD'] == 'true'}\n"
+                "File.write(args.fetch('--record'), JSON.generate(record))\n"
+                "puts kind\n",
+                encoding="utf-8",
+            )
             output = root / "output"
             validator_log = root / "validator-argv.json"
+            website_validator_log = root / "website-validator-argv.json"
             result = run_bash(self.SCRIPT, root, {
                 "EVENT_NAME": event, "HEAD_REF": branch,
                 "HEAD_REPOSITORY": head_repository,
@@ -414,12 +458,17 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                 "POLICY_SHA": base, "RUNNER_TEMP": str(root),
                 "VALIDATOR_LOG": str(validator_log), "STUB_KIND": typed_kind,
                 "INVALID_RECORD": str(invalid_record).lower(),
+                "WEBSITE_VALIDATOR_LOG": str(website_validator_log),
+                "WEBSITE_STUB_KIND": website_kind,
+                "INVALID_WEBSITE_RECORD": str(invalid_website_record).lower(),
                 "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
                 "GITHUB_OUTPUT": str(output),
             })
             values = (result.returncode, output.read_text() if output.exists() else "", result.stderr + result.stdout)
             if return_argv:
                 return (*values, json.loads(validator_log.read_text()) if validator_log.exists() else {})
+            if return_website_argv:
+                return (*values, json.loads(website_validator_log.read_text()) if website_validator_log.exists() else {})
             return values
 
     def test_regular_source_pr_passes_with_no_target(self) -> None:
@@ -533,6 +582,48 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertEqual(argv["--event"], "merge_group")
         self.assertEqual(argv["--base-ref"], "refs/heads/main")
 
+    def test_exact_website_secret_projection_uses_trusted_main_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/website-origin.sops.yaml", "website/origin-projection",
+            website_kind="origin-secret-projection", return_website_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=origin-secret-projection\noperation_target=existing-public-website\nwebsite_operation=yes\n")
+        self.assertEqual(argv["--policy-repo"], "trusted")
+        self.assertEqual(argv["--diff-base-repo"], "gate")
+        self.assertEqual(argv["--candidate-repo"], "candidate")
+        self.assertEqual(argv["--event"], "pull_request")
+
+    def test_exact_website_provider_merge_group_uses_website_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/website-r2-test/r2.json", "", event="merge_group",
+            website_kind="r2-prerequisite-apply", return_website_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=r2-prerequisite-apply\noperation_target=existing-public-website\nwebsite_operation=yes\n")
+        self.assertEqual(argv["--base-ref"], "refs/heads/main")
+
+    def test_exact_public_website_serving_has_separate_effect_record(self) -> None:
+        code, output, message = self.classify(
+            "clusters/staging-do/website-release/active/release.json", "website/public-release",
+            website_kind="website-public-release")
+        self.assertEqual(code, 0, message)
+        self.assertIn("operation_target=existing-public-website", output)
+
+    def test_invalid_website_local_match_refuses_pr(self) -> None:
+        code, output, message = self.classify(
+            "clusters/staging-do/website-origin.sops.yaml", "website/origin-projection",
+            website_kind="origin-secret-projection", invalid_website_record=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("invalid local match", message)
+
+    def test_unrecognized_website_kind_refuses_pr(self) -> None:
+        code, output, message = self.classify(
+            "clusters/staging-do/website-anything.yaml", "website/broad",
+            website_kind="generic-bypass")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("unknown kind", message)
+
     def test_empty_merge_group_target_ref_refuses_typed_route(self) -> None:
         code, output, message, argv = self.classify(
             "clusters/staging-do/approved.sops.yaml", "", event="merge_group",
@@ -603,6 +694,8 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertIn("github.event_name == 'merge_group' || github.event_name == 'pull_request'", job)
         self.assertNotIn("startsWith(github.event.pull_request.head.ref", job)
         self.assertIn("ruby trusted/scripts/validate-readiness-operation.rb", job)
+        self.assertIn("ruby trusted/scripts/validate-website-operation.rb", job)
+        self.assertIn("Verify default-main operation policy remains current", job)
         self.assertIn("github.event.merge_group.base_ref", job)
         self.assertIn("if: steps.target.outputs.targets != ''", job)
         self.assertIn("name: gitops-typed-operation-validation", job)
@@ -648,9 +741,98 @@ class FullReadinessTrustTest(unittest.TestCase):
             self.assertIn('"--env","staging-do"', args)
 
 
+class WebsiteNativeEvidenceStepTest(unittest.TestCase):
+    SCRIPT = step_script("ci.yml", "Validate native website operation evidence")
+
+    def run_step(self, *, token: str = "fixture-org-read", record_status: str = "VALIDATED",
+                 live_sha: str = "a" * 40, kind: str = "r2-prerequisite-apply",
+                 source_type: str | None = None,
+                 artifact_digest_json: str | None = None) -> subprocess.CompletedProcess[str]:
+        effect = ("secret-preparation" if kind == "script-publisher-credential-preparation" else
+                  "secret-projection" if kind == "origin-secret-projection" else
+                  "public-serving" if kind == "website-public-release" else "provider-mutation")
+        source_type = source_type or ("gitops-ci" if effect.startswith("secret-") else
+                                      "retained-release" if effect == "public-serving" else "controller-publish")
+        if artifact_digest_json is None:
+            artifact_digest_json = json.dumps(None if effect.startswith("secret-") else "sha256:" + "b" * 64)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted = root / "trusted" / "scripts"
+            trusted.mkdir(parents=True)
+            (trusted / "validate-website-operation.rb").write_text(
+                "require 'json'\n"
+                "abort 'missing website-only token' if ENV['WEBSITE_SOURCE_GH_TOKEN'].to_s.empty?\n"
+                "args = ARGV.each_slice(2).to_h\n"
+                "record = {'schema' => 'gitops-website-operation-validation-v1',\n"
+                "  'status' => ENV.fetch('RECORD_STATUS'), 'target' => 'existing-public-website',\n"
+                "  'environment' => 'staging-do', 'kind' => ENV.fetch('RECORD_KIND'),\n"
+                "  'effect' => ENV.fetch('RECORD_EFFECT'), 'policyCommitSha' => args.fetch('--policy-sha'),\n"
+                "  'diffBaseSha' => args.fetch('--diff-base-sha'), 'candidateSha' => args.fetch('--candidate-sha'),\n"
+                "  'operationDigest' => 'sha256:' + 'a' * 64,\n"
+                "  'receipts' => {'source' => {'type' => ENV.fetch('SOURCE_TYPE'),\n"
+                "                            'artifactDigest' => JSON.parse(ENV.fetch('ARTIFACT_DIGEST_JSON'))},\n"
+                "                 'operator' => {'sha256' => 'c' * 64}},\n"
+                "  'servingChange' => ENV.fetch('RECORD_EFFECT') == 'public-serving',\n"
+                "  'runtimeMutation' => ['provider-mutation', 'public-serving'].include?(ENV.fetch('RECORD_EFFECT')),\n"
+                "  'environmentReadinessAssessed' => false, 'productAccepted' => false}\n"
+                "File.write(args.fetch('--record'), JSON.generate(record))\n"
+                "puts record.fetch('kind')\n",
+                encoding="utf-8",
+            )
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"${LIVE_SHA}\"\n", encoding="utf-8")
+            gh.chmod(0o755)
+            return run_bash(self.SCRIPT, root, {
+                "PATH": f"{root}:{os.environ['PATH']}", "RUNNER_TEMP": str(root),
+                "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "WEBSITE_SOURCE_GH_TOKEN": token, "GH_TOKEN": "fixture-repo-token",
+                "EVENT_NAME": "pull_request", "HEAD_REF": "website/r2", "HEAD_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "BASE_REF": "main", "DEFAULT_BRANCH": "main",
+                "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40,
+                "POLICY_SHA": "a" * 40, "EXPECTED_KIND": kind,
+                "RECORD_KIND": kind, "RECORD_EFFECT": effect,
+                "SOURCE_TYPE": source_type, "ARTIFACT_DIGEST_JSON": artifact_digest_json,
+                "RECORD_STATUS": record_status, "LIVE_SHA": live_sha,
+            })
+
+    def test_only_website_step_receives_cross_repository_token(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        classifier = workflow.split("      - name: Identify exact promotion target\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("--inspect-local", classifier)
+        self.assertNotIn("MINDBURN_ORG_READ_TOKEN", classifier)
+        self.assertIn("WEBSITE_SOURCE_GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}", workflow)
+        self.assertIn("if: steps.target.outputs.website_operation == 'yes'", workflow)
+        result = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_missing_token_failed_record_and_moved_main_refuse(self) -> None:
+        for overrides in ({"token": ""}, {"record_status": "LOCAL_MATCH"}, {"live_sha": "c" * 40}):
+            with self.subTest(overrides=overrides):
+                self.assertNotEqual(self.run_step(**overrides).returncode, 0)
+
+    def test_secret_operations_accept_native_absence_and_refuse_fabricated_artifacts(self) -> None:
+        for kind in ("origin-secret-projection", "script-publisher-credential-preparation"):
+            with self.subTest(kind=kind):
+                valid = self.run_step(kind=kind)
+                self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
+                fabricated = self.run_step(kind=kind, artifact_digest_json=json.dumps("sha256:" + "b" * 64))
+                self.assertNotEqual(fabricated.returncode, 0)
+                wrong_type = self.run_step(kind=kind, source_type="controller-publish")
+                self.assertNotEqual(wrong_type.returncode, 0)
+
+    def test_provider_and_public_operations_require_native_artifact_digest(self) -> None:
+        for kind in ("r2-prerequisite-apply", "website-public-release"):
+            with self.subTest(kind=kind):
+                valid = self.run_step(kind=kind)
+                self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
+                missing = self.run_step(kind=kind, artifact_digest_json="null")
+                self.assertNotEqual(missing.returncode, 0)
+
+
 class DefaultMainPolicyTest(unittest.TestCase):
     RESOLVE = step_script("ci.yml", "Resolve actual default-main operation policy")
     VERIFY = step_script("ci.yml", "Verify current default-main policy checkout")
+    FINAL = step_script("ci.yml", "Verify default-main operation policy remains current")
 
     def run_step(self, script: str, *, event_branch: str = "main",
                  api_branch: str = "main", api_sha: str = "a" * 40) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -720,6 +902,21 @@ class DefaultMainPolicyTest(unittest.TestCase):
         self.assertIn("fetch-depth: 0", checkout)
         self.assertIn("path: trusted", checkout)
         self.assertIn("persist-credentials: false", checkout)
+
+    def test_operation_refuses_main_moving_after_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$FAKE_SHA\"\n", encoding="utf-8")
+            gh.chmod(0o755)
+            env = {"PATH": f"{root}:{os.environ['PATH']}",
+                   "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                   "POLICY_SHA": "a" * 40, "FAKE_SHA": "a" * 40}
+            passed = run_bash(self.FINAL, root, env)
+            self.assertEqual(passed.returncode, 0, passed.stderr + passed.stdout)
+            moved = run_bash(self.FINAL, root, {**env, "FAKE_SHA": "b" * 40})
+            self.assertNotEqual(moved.returncode, 0)
+            self.assertIn("default main moved after operation validation", moved.stderr + moved.stdout)
 
 
 class GateTest(unittest.TestCase):
