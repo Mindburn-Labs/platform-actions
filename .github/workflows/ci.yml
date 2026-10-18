@@ -427,7 +427,8 @@ jobs:
               case "${output}" in
                 r2-writer-credential-preparation|script-publisher-credential-preparation|\
                 origin-secret-projection|r2-writer-secret-projection|script-publisher-secret-projection|\
-                turnstile-secret-projection|r2-prerequisite-apply|formation-claim-bootstrap|website-public-release) ;;
+                turnstile-secret-projection|r2-prerequisite-apply|formation-claim-bootstrap|\
+                turnstile-binding-activation|website-public-release) ;;
                 *) echo "::error::trusted website validator returned an unknown kind"; return 1 ;;
               esac
               printf 'targets=\noperation_kind=%s\noperation_target=existing-public-website\nwebsite_operation=yes\n' "${output}" >>"${GITHUB_OUTPUT}"
@@ -515,7 +516,8 @@ jobs:
              .status == "VALIDATED" and .target == "existing-public-website" and
              .environment == "staging-do" and .kind == $kind and
              .effect == (if $kind == "website-public-release" then "public-serving"
-                        elif $kind == "r2-prerequisite-apply" or $kind == "formation-claim-bootstrap" then "provider-mutation"
+                        elif $kind == "r2-prerequisite-apply" or $kind == "formation-claim-bootstrap" or
+                             $kind == "turnstile-binding-activation" then "provider-mutation"
                         elif $kind == "r2-writer-credential-preparation" or
                              $kind == "script-publisher-credential-preparation" then "secret-preparation"
                         else "secret-projection" end) and

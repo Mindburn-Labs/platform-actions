@@ -425,7 +425,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                 "end\n"
                 "effect = case kind\n"
                 "  when 'origin-secret-projection' then 'secret-projection'\n"
-                "  when 'r2-prerequisite-apply' then 'provider-mutation'\n"
+                "  when 'r2-prerequisite-apply', 'turnstile-binding-activation' then 'provider-mutation'\n"
                 "  when 'website-public-release' then 'public-serving'\n"
                 "  else 'unknown'\n"
                 "end\n"
@@ -600,6 +600,18 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertEqual(code, 0, message)
         self.assertEqual(output, "targets=\noperation_kind=r2-prerequisite-apply\noperation_target=existing-public-website\nwebsite_operation=yes\n")
         self.assertEqual(argv["--base-ref"], "refs/heads/main")
+
+    def test_exact_turnstile_binding_uses_the_trusted_website_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            None, "website/turnstile-binding", website_kind="turnstile-binding-activation",
+            changed_paths=(
+                "clusters/staging-do/kustomization.yaml",
+                "clusters/staging-do/website-turnstile-reviewed/turnstile.json",
+                "clusters/staging-do/website-turnstile-reviewed/kustomization.yaml",
+            ), return_website_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=turnstile-binding-activation\noperation_target=existing-public-website\nwebsite_operation=yes\n")
+        self.assertEqual(argv["--policy-repo"], "trusted")
 
     def test_exact_public_website_serving_has_separate_effect_record(self) -> None:
         code, output, message = self.classify(
@@ -821,12 +833,18 @@ class WebsiteNativeEvidenceStepTest(unittest.TestCase):
                 self.assertNotEqual(wrong_type.returncode, 0)
 
     def test_provider_and_public_operations_require_native_artifact_digest(self) -> None:
-        for kind in ("r2-prerequisite-apply", "website-public-release"):
+        for kind in ("r2-prerequisite-apply", "turnstile-binding-activation", "website-public-release"):
             with self.subTest(kind=kind):
                 valid = self.run_step(kind=kind)
                 self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
                 missing = self.run_step(kind=kind, artifact_digest_json="null")
                 self.assertNotEqual(missing.returncode, 0)
+
+    def test_turnstile_binding_requires_the_controller_producer(self) -> None:
+        valid = self.run_step(kind="turnstile-binding-activation")
+        self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
+        wrong = self.run_step(kind="turnstile-binding-activation", source_type="gitops-ci")
+        self.assertNotEqual(wrong.returncode, 0)
 
 
 class DefaultMainPolicyTest(unittest.TestCase):
