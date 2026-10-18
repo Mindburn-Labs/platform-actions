@@ -286,8 +286,7 @@ jobs:
     name: release readiness
     if: >-
       github.repository == 'Mindburn-Labs/gitops-platform' &&
-      (github.event_name == 'merge_group' ||
-       (github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'promote/')))
+      (github.event_name == 'merge_group' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -316,29 +315,51 @@ jobs:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
           [[ "$(git -C candidate rev-parse HEAD)" == "${CANDIDATE_SHA}" ]] || exit 1
+          changed_file="$(mktemp)"
           if [[ "${EVENT_NAME}" == pull_request ]]; then
-            [[ "${HEAD_REPOSITORY}" == "${GITHUB_REPOSITORY}" && "${BASE_REF}" == "${DEFAULT_BRANCH}" ]] || {
-              echo "::error::promotion PR must originate in this repository and target the default branch"; exit 1;
+            git -C candidate diff --name-only -z "${BASE_SHA}...${CANDIDATE_SHA}" >"${changed_file}" || {
+              echo "::error::cannot classify changed cluster paths"; exit 1;
             }
-            case "${HEAD_REF}" in
-              promote/staging-*) target=staging-do ;;
-              promote/production-*) target=production-do ;;
-              *) echo "::error::unknown promotion target"; exit 1 ;;
-            esac
-            mapfile -t changed < <(git -C candidate diff --name-only "${BASE_SHA}...${CANDIDATE_SHA}")
-            [[ "${#changed[@]}" -gt 0 ]] || { echo "::error::empty promotion PR"; exit 1; }
-            for path in "${changed[@]}"; do
-              [[ "${path}" == "clusters/${target}/"* ]] || {
-                echo "::error::promotion PR changed an unrelated path: ${path}"; exit 1;
-              }
-            done
-            printf 'targets=%s\n' "${target}" >>"${GITHUB_OUTPUT}"
           else
-            merge_changed="$(git -C candidate diff --name-only "${BASE_SHA}" "${CANDIDATE_SHA}")"
-            targets=()
-            if grep -q '^clusters/staging-do/' <<<"${merge_changed}"; then targets+=(staging-do); fi
-            if grep -q '^clusters/production-do/' <<<"${merge_changed}"; then targets+=(production-do); fi
-            printf 'targets=%s\n' "${targets[*]}" >>"${GITHUB_OUTPUT}"
+            git -C candidate diff --name-only -z "${BASE_SHA}" "${CANDIDATE_SHA}" >"${changed_file}" || {
+              echo "::error::cannot classify changed cluster paths"; exit 1;
+            }
+          fi
+          mapfile -d '' -t changed <"${changed_file}"
+          rm -- "${changed_file}"
+          targets=()
+          for path in "${changed[@]}"; do
+            case "${path}" in
+              clusters/staging-do/*) targets+=(staging-do) ;;
+              clusters/production-do/*) targets+=(production-do) ;;
+            esac
+          done
+          if [[ "${EVENT_NAME}" == pull_request ]]; then
+            if [[ "${HEAD_REF}" == promote/* || "${#targets[@]}" -gt 0 ]]; then
+              [[ "${HEAD_REPOSITORY}" == "${GITHUB_REPOSITORY}" && "${BASE_REF}" == "${DEFAULT_BRANCH}" ]] || {
+                echo "::error::promotion PR must originate in this repository and target the default branch"; exit 1;
+              }
+              case "${HEAD_REF}" in
+                promote/staging-*) target=staging-do ;;
+                promote/production-*) target=production-do ;;
+                *) echo "::error::target cluster changes require a promote/staging-* or promote/production-* branch"; exit 1 ;;
+              esac
+              [[ "${#changed[@]}" -gt 0 ]] || { echo "::error::empty promotion PR"; exit 1; }
+              for path in "${changed[@]}"; do
+                [[ "${path}" == "clusters/${target}/"* ]] || {
+                  echo "::error::promotion PR changed an unrelated path: ${path}"; exit 1;
+                }
+              done
+              printf 'targets=%s\n' "${target}" >>"${GITHUB_OUTPUT}"
+            else
+              printf 'targets=\n' >>"${GITHUB_OUTPUT}"
+            fi
+          else
+            unique_targets=()
+            for target in "${targets[@]}"; do
+              if [[ " ${unique_targets[*]} " != *" ${target} "* ]]; then unique_targets+=("${target}"); fi
+            done
+            printf 'targets=%s\n' "${unique_targets[*]}" >>"${GITHUB_OUTPUT}"
           fi
       - name: Read source-owned evidence
         if: steps.target.outputs.targets != ''
@@ -466,14 +487,13 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           : "${EVENT_NAME:?GitHub event is required for the skip policy}"
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${NEEDS}"
-          jq -e --arg event "${EVENT_NAME}" --arg repo "${REPOSITORY}" --arg head "${HEAD_REF}" '
+          jq -e --arg event "${EVENT_NAME}" --arg repo "${REPOSITORY}" '
             def readiness_required:
               $repo == "Mindburn-Labs/gitops-platform"
-              and ($event == "merge_group" or ($event == "pull_request" and ($head | startswith("promote/"))));
+              and ($event == "merge_group" or $event == "pull_request");
             has("check") and has("dependency-scan") and has("release-readiness")
             and .check.result == "success"
             and (if readiness_required then .["release-readiness"].result == "success"
