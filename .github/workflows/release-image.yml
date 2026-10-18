@@ -8,7 +8,7 @@
 #       tags: ['v*']
 #   jobs:
 #     image:
-#       uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2.0.1
+#       uses: Mindburn-Labs/platform-actions/.github/workflows/release-image.yml@v2.0.2
 #       permissions:
 #         contents: read
 #         packages: write
