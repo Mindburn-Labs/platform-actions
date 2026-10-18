@@ -343,6 +343,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                  head_repository: str = "Mindburn-Labs/gitops-platform",
                  changed_paths: tuple[str, ...] | None = None,
                  typed_kind: str = "", invalid_record: bool = False,
+                 base_ref: str | None = None,
                  return_argv: bool = False) -> tuple[int, str, str] | tuple[int, str, str, dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -406,7 +407,9 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
             result = run_bash(self.SCRIPT, root, {
                 "EVENT_NAME": event, "HEAD_REF": branch,
                 "HEAD_REPOSITORY": head_repository,
-                "BASE_REF": "main", "DEFAULT_BRANCH": "main",
+                "BASE_REF": base_ref if base_ref is not None else
+                    ("refs/heads/main" if event == "merge_group" else "main"),
+                "DEFAULT_BRANCH": "main",
                 "BASE_SHA": base_sha or base, "CANDIDATE_SHA": head,
                 "POLICY_SHA": base, "RUNNER_TEMP": str(root),
                 "VALIDATOR_LOG": str(validator_log), "STUB_KIND": typed_kind,
@@ -528,6 +531,45 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertEqual(code, 0, message)
         self.assertEqual(output, "targets=\noperation_kind=credential-preparation\n")
         self.assertEqual(argv["--event"], "merge_group")
+        self.assertEqual(argv["--base-ref"], "refs/heads/main")
+
+    def test_empty_merge_group_target_ref_refuses_typed_route(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/approved.sops.yaml", "", event="merge_group",
+            typed_kind="credential-preparation", base_ref="", return_argv=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(argv, {})
+        self.assertIn("must target actual default main", message)
+
+    def test_nonmain_merge_group_target_ref_refuses_typed_route(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/approved.sops.yaml", "", event="merge_group",
+            typed_kind="credential-preparation", base_ref="refs/heads/release-review",
+            return_argv=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(argv, {})
+        self.assertIn("must target actual default main", message)
+
+    def test_nonmain_merge_group_cannot_reach_full_readiness_fallback(self) -> None:
+        code, output, message, argv = self.classify(
+            None, "", event="merge_group", base_ref="refs/heads/release-review",
+            changed_paths=("clusters/staging-do/pin.yaml", "clusters/production-do/pin.yaml"),
+            return_argv=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(argv, {})
+        self.assertIn("must target actual default main", message)
+
+    def test_nonmain_pr_target_ref_refuses_typed_route(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/approved.sops.yaml", "operations/credential",
+            typed_kind="credential-preparation", base_ref="release-review", return_argv=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertEqual(argv, {})
+        self.assertIn("must originate in this repository and target", message)
 
     def test_invalid_operation_record_fails_pr(self) -> None:
         code, output, message = self.classify(
@@ -561,6 +603,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertIn("github.event_name == 'merge_group' || github.event_name == 'pull_request'", job)
         self.assertNotIn("startsWith(github.event.pull_request.head.ref", job)
         self.assertIn("ruby trusted/scripts/validate-readiness-operation.rb", job)
+        self.assertIn("github.event.merge_group.base_ref", job)
         self.assertIn("if: steps.target.outputs.targets != ''", job)
         self.assertIn("name: gitops-typed-operation-validation", job)
         typed_outcome = job.split("      - name: Record bounded operation outcome\n", 1)[1].split("      - name:", 1)[0]
@@ -568,6 +611,41 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         full_rc = job.split("      - name: Evaluate every touched environment\n", 1)[1].split("      - name:", 1)[0]
         self.assertIn("if: steps.target.outputs.targets != ''", full_rc)
         self.assertIn("MINDBURN_ORG_READ_TOKEN", full_rc)
+        self.assertIn("ruby trusted/scripts/release-readiness.rb", full_rc)
+        self.assertIn("--policy-repo trusted", full_rc)
+        self.assertNotIn("ruby gate/scripts/release-readiness.rb", job)
+
+
+class FullReadinessTrustTest(unittest.TestCase):
+    SCRIPT = step_script("ci.yml", "Evaluate every touched environment")
+
+    def test_event_base_code_cannot_run_with_org_read_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for checkout in ("trusted", "gate"):
+                (root / checkout / "scripts").mkdir(parents=True)
+            trusted = root / "trusted" / "scripts" / "release-readiness.rb"
+            trusted.write_text(
+                "require 'json'\n"
+                "File.write(File.join(ENV.fetch('RUNNER_TEMP'), 'trusted-call.json'), JSON.generate(ARGV))\n",
+                encoding="utf-8",
+            )
+            base = root / "gate" / "scripts" / "release-readiness.rb"
+            base.write_text(
+                "File.write(File.join(ENV.fetch('RUNNER_TEMP'), 'unmerged-base-executed'), 'bad')\n"
+                "exit 77\n",
+                encoding="utf-8",
+            )
+            result = run_bash(self.SCRIPT, root, {
+                "TARGETS": "staging-do", "CANDIDATE_SHA": "a" * 40,
+                "RUNNER_TEMP": str(root), "GH_TOKEN": "fixture-read-token",
+            })
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertFalse((root / "unmerged-base-executed").exists())
+            args = (root / "trusted-call.json").read_text(encoding="utf-8")
+            self.assertIn('"--policy-repo","trusted"', args)
+            self.assertIn('"--repo","candidate"', args)
+            self.assertIn('"--env","staging-do"', args)
 
 
 class DefaultMainPolicyTest(unittest.TestCase):

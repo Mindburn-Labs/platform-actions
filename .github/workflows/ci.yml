@@ -16,7 +16,7 @@
 # Jobs:
 #   check           toolchains detected from the repository, then `make check`.
 #   release-readiness  exact GitOps promotion or a frozen staging operation.
-#                     Promotion uses the event-base evaluator and source-owned
+#                     Promotion uses the verified default-main evaluator and source-owned
 #                     signed evidence. Finite operations use independently
 #                     resolved default-main policy and no org read token.
 #   dependency-scan pull requests and merge groups only: fails on a HIGH or
@@ -326,7 +326,7 @@ jobs:
           [[ "${current_sha}" == "${POLICY_SHA}" ]] || {
             echo "::error::default main moved during policy checkout"; exit 1;
           }
-      - name: Check out event-base release evaluator and policy
+      - name: Check out event diff base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
@@ -345,13 +345,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           POLICY_SHA: ${{ steps.policy.outputs.sha }}
         run: |
           [[ "$(git -C candidate rev-parse HEAD)" == "${CANDIDATE_SHA}" ]] || exit 1
+          if [[ "${EVENT_NAME}" == merge_group ]]; then
+            [[ "${DEFAULT_BRANCH}" == main && "${BASE_REF}" == refs/heads/main ]] || {
+              echo "::error::merge group must target actual default main"; exit 1;
+            }
+          fi
           changed_file="$(mktemp)"
           # Show both sides of a move so deleting a target-cluster file cannot
           # be hidden by a destination outside that cluster.
@@ -436,10 +441,10 @@ jobs:
               printf 'targets=\n' >>"${GITHUB_OUTPUT}"
             fi
           else
-            if [[ "${unique_targets[*]}" == staging-do ]] && validate_typed_operation; then
-              exit 0
-            fi
             if [[ "${unique_targets[*]}" == staging-do ]]; then
+              if validate_typed_operation; then
+                exit 0
+              fi
               echo "merge-group change is outside the finite operation permits; evaluating full readiness"
             fi
             printf 'targets=%s\n' "${unique_targets[*]}" >>"${GITHUB_OUTPUT}"
@@ -468,8 +473,8 @@ jobs:
           rc=0
           read -r -a targets <<<"${TARGETS}"
           for target in "${targets[@]}"; do
-            ruby gate/scripts/release-readiness.rb \
-              --repo candidate --policy-repo gate --evidence evidence \
+            ruby trusted/scripts/release-readiness.rb \
+              --repo candidate --policy-repo trusted --evidence evidence \
               --env "${target}" --sha "${CANDIDATE_SHA}" \
               --output "${RUNNER_TEMP}/release-readiness-${target}.json" || rc=1
           done
