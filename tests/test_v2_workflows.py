@@ -340,7 +340,10 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
     def classify(self, changed_path: str | None, branch: str, *, base_sha: str | None = None,
                  event: str = "pull_request", move: tuple[str, str] | None = None,
                  delete: str | None = None,
-                 head_repository: str = "Mindburn-Labs/gitops-platform") -> tuple[int, str, str]:
+                 head_repository: str = "Mindburn-Labs/gitops-platform",
+                 changed_paths: tuple[str, ...] | None = None,
+                 typed_kind: str = "", invalid_record: bool = False,
+                 return_argv: bool = False) -> tuple[int, str, str] | tuple[int, str, str, dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = root / "candidate"
@@ -363,21 +366,58 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
             elif delete:
                 (candidate / delete).unlink()
             else:
-                assert changed_path is not None
-                (candidate / changed_path).write_text("changed\n", encoding="utf-8")
+                paths = changed_paths or ((changed_path,) if changed_path is not None else ())
+                assert paths
+                for name in paths:
+                    path = candidate / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("changed\n", encoding="utf-8")
             git(candidate, "add", "-A")
             git(candidate, "commit", "-qm", "candidate")
             head = git(candidate, "rev-parse", "HEAD")
+            for checkout in ("gate", "trusted"):
+                path = root / checkout
+                subprocess.run(["git", "clone", "-q", str(candidate), str(path)], check=True)
+                git(path, "checkout", "-q", base)
+            script = root / "trusted" / "scripts" / "validate-readiness-operation.rb"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text(
+                "require 'json'\n"
+                "args = ARGV.each_slice(2).to_h\n"
+                "File.write(ENV.fetch('VALIDATOR_LOG'), JSON.generate(args))\n"
+                "kind = ENV.fetch('STUB_KIND')\n"
+                "if kind.empty?\n"
+                "  warn '::error::readiness operation refused: fixture'\n"
+                "  exit 1\n"
+                "end\n"
+                "record = {'schema' => 'gitops-readiness-operation-validation-v1',\n"
+                "  'status' => 'VALIDATED', 'kind' => kind,\n"
+                "  'policyCommitSha' => args.fetch('--policy-sha'),\n"
+                "  'diffBaseSha' => args.fetch('--diff-base-sha'),\n"
+                "  'candidateSha' => args.fetch('--candidate-sha'),\n"
+                "  'servingChange' => ENV['INVALID_RECORD'] == 'true',\n"
+                "  'environmentReadinessAssessed' => false, 'productAccepted' => false}\n"
+                "File.write(args.fetch('--record'), JSON.generate(record))\n"
+                "puts kind\n",
+                encoding="utf-8",
+            )
             output = root / "output"
+            validator_log = root / "validator-argv.json"
             result = run_bash(self.SCRIPT, root, {
                 "EVENT_NAME": event, "HEAD_REF": branch,
                 "HEAD_REPOSITORY": head_repository,
                 "BASE_REF": "main", "DEFAULT_BRANCH": "main",
                 "BASE_SHA": base_sha or base, "CANDIDATE_SHA": head,
+                "POLICY_SHA": base, "RUNNER_TEMP": str(root),
+                "VALIDATOR_LOG": str(validator_log), "STUB_KIND": typed_kind,
+                "INVALID_RECORD": str(invalid_record).lower(),
                 "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
                 "GITHUB_OUTPUT": str(output),
             })
-            return result.returncode, output.read_text() if output.exists() else "", result.stderr + result.stdout
+            values = (result.returncode, output.read_text() if output.exists() else "", result.stderr + result.stdout)
+            if return_argv:
+                return (*values, json.loads(validator_log.read_text()) if validator_log.exists() else {})
+            return values
 
     def test_regular_source_pr_passes_with_no_target(self) -> None:
         code, output, message = self.classify("README.md", "feature/readme")
@@ -456,11 +496,152 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("must originate in this repository", message)
 
+    def test_reviewed_credential_pr_uses_trusted_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/approved.sops.yaml", "operations/credential",
+            typed_kind="credential-preparation", return_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=credential-preparation\n")
+        self.assertEqual(argv["--policy-repo"], "trusted")
+        self.assertEqual(argv["--diff-base-repo"], "gate")
+        self.assertEqual(argv["--candidate-repo"], "candidate")
+        self.assertEqual(argv["--event"], "pull_request")
+        self.assertEqual(argv["--base-ref"], "main")
+        self.assertEqual(argv["--default-branch"], "main")
+
+    def test_reviewed_diagnostic_pr_with_three_paths_uses_one_permit(self) -> None:
+        code, output, message, argv = self.classify(
+            None, "operations/readback", typed_kind="diagnostic-readback",
+            changed_paths=(
+                "clusters/staging-do/kustomization.yaml",
+                "clusters/staging-do/readback/r2.json",
+                "clusters/staging-do/readback/kustomization.yaml",
+            ), return_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=diagnostic-readback\n")
+        self.assertEqual(argv["--repository"], "Mindburn-Labs/gitops-platform")
+
+    def test_reviewed_merge_group_uses_typed_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/approved.sops.yaml", "", event="merge_group",
+            typed_kind="credential-preparation", return_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=credential-preparation\n")
+        self.assertEqual(argv["--event"], "merge_group")
+
+    def test_invalid_operation_record_fails_pr(self) -> None:
+        code, output, message = self.classify(
+            "clusters/staging-do/approved.sops.yaml", "operations/credential",
+            typed_kind="credential-preparation", invalid_record=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("invalid record", message)
+
+    def test_unpermitted_merge_group_falls_back_to_full_readiness(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/pin.yaml", "", event="merge_group", return_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=staging-do\n")
+        self.assertEqual(argv["--event"], "merge_group")
+        self.assertIn("evaluating full readiness", message)
+
+    def test_cross_target_merge_group_does_not_try_typed_permit(self) -> None:
+        code, output, message, argv = self.classify(
+            None, "", event="merge_group", typed_kind="credential-preparation",
+            changed_paths=("clusters/staging-do/pin.yaml", "clusters/production-do/pin.yaml"),
+            return_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(set(output.strip().removeprefix("targets=").split()),
+                         {"staging-do", "production-do"})
+        self.assertEqual(argv, {})
+
     def test_readiness_job_is_scheduled_for_every_gitops_pr(self) -> None:
         workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         job = workflow.split("  release-readiness:\n", 1)[1].split("  dependency-scan:\n", 1)[0]
         self.assertIn("github.event_name == 'merge_group' || github.event_name == 'pull_request'", job)
         self.assertNotIn("startsWith(github.event.pull_request.head.ref", job)
+        self.assertIn("ruby trusted/scripts/validate-readiness-operation.rb", job)
+        self.assertIn("if: steps.target.outputs.targets != ''", job)
+        self.assertIn("name: gitops-typed-operation-validation", job)
+        typed_outcome = job.split("      - name: Record bounded operation outcome\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("MINDBURN_ORG_READ_TOKEN", typed_outcome)
+        full_rc = job.split("      - name: Evaluate every touched environment\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: steps.target.outputs.targets != ''", full_rc)
+        self.assertIn("MINDBURN_ORG_READ_TOKEN", full_rc)
+
+
+class DefaultMainPolicyTest(unittest.TestCase):
+    RESOLVE = step_script("ci.yml", "Resolve actual default-main operation policy")
+    VERIFY = step_script("ci.yml", "Verify current default-main policy checkout")
+
+    def run_step(self, script: str, *, event_branch: str = "main",
+                 api_branch: str = "main", api_sha: str = "a" * 40) -> tuple[subprocess.CompletedProcess[str], str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = root / "gh"
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$2\" == repos/Mindburn-Labs/gitops-platform ]]; then\n"
+                "  printf '%s\\n' \"${FAKE_BRANCH}\"\n"
+                "else\n"
+                "  printf '%s\\n' \"${FAKE_SHA}\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            output = root / "output"
+            result = run_bash(script, root, {
+                "PATH": f"{root}:{os.environ['PATH']}",
+                "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "GITHUB_OUTPUT": str(output), "EVENT_DEFAULT_BRANCH": event_branch,
+                "FAKE_BRANCH": api_branch, "FAKE_SHA": api_sha,
+            })
+            return result, output.read_text() if output.exists() else ""
+
+    def test_policy_resolves_actual_main_commit(self) -> None:
+        result, output = self.run_step(self.RESOLVE)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(output, f"sha={'a' * 40}\n")
+
+    def test_policy_refuses_nonmain_default_or_invalid_sha(self) -> None:
+        for branch, sha in (("trunk", "a" * 40), ("main", "bad-sha")):
+            with self.subTest(branch=branch, sha=sha):
+                result, _ = self.run_step(self.RESOLVE, api_branch=branch, api_sha=sha)
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_policy_refuses_stale_event_default_branch(self) -> None:
+        result, _ = self.run_step(self.RESOLVE, event_branch="trunk")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_checkout_must_match_live_main(self) -> None:
+        # The API head must equal the separately checked-out commit.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            git(trusted, "init", "-q", "-b", "main")
+            git(trusted, "config", "user.email", "test@example.invalid")
+            git(trusted, "config", "user.name", "Test")
+            git(trusted, "commit", "-qm", "policy", "--allow-empty")
+            sha = git(trusted, "rev-parse", "HEAD")
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"${FAKE_SHA}\"\n", encoding="utf-8")
+            gh.chmod(0o755)
+            env = {"PATH": f"{root}:{os.environ['PATH']}",
+                   "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                   "POLICY_SHA": sha, "FAKE_SHA": sha}
+            passed = run_bash(self.VERIFY, root, env)
+            self.assertEqual(passed.returncode, 0, passed.stderr + passed.stdout)
+            moved = run_bash(self.VERIFY, root, {**env, "FAKE_SHA": "b" * 40})
+            self.assertNotEqual(moved.returncode, 0)
+
+    def test_checkout_uses_independent_resolved_commit(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        checkout = workflow.split("      - name: Check out actual default-main operation policy\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("ref: ${{ steps.policy.outputs.sha }}", checkout)
+        self.assertIn("fetch-depth: 0", checkout)
+        self.assertIn("path: trusted", checkout)
+        self.assertIn("persist-credentials: false", checkout)
 
 
 class GateTest(unittest.TestCase):
