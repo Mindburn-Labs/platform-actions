@@ -745,7 +745,16 @@ class WebsiteNativeEvidenceStepTest(unittest.TestCase):
     SCRIPT = step_script("ci.yml", "Validate native website operation evidence")
 
     def run_step(self, *, token: str = "fixture-org-read", record_status: str = "VALIDATED",
-                 live_sha: str = "a" * 40) -> subprocess.CompletedProcess[str]:
+                 live_sha: str = "a" * 40, kind: str = "r2-prerequisite-apply",
+                 source_type: str | None = None,
+                 artifact_digest_json: str | None = None) -> subprocess.CompletedProcess[str]:
+        effect = ("secret-preparation" if kind == "script-publisher-credential-preparation" else
+                  "secret-projection" if kind == "origin-secret-projection" else
+                  "public-serving" if kind == "website-public-release" else "provider-mutation")
+        source_type = source_type or ("gitops-ci" if effect.startswith("secret-") else
+                                      "retained-release" if effect == "public-serving" else "controller-publish")
+        if artifact_digest_json is None:
+            artifact_digest_json = json.dumps(None if effect.startswith("secret-") else "sha256:" + "b" * 64)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trusted = root / "trusted" / "scripts"
@@ -756,13 +765,15 @@ class WebsiteNativeEvidenceStepTest(unittest.TestCase):
                 "args = ARGV.each_slice(2).to_h\n"
                 "record = {'schema' => 'gitops-website-operation-validation-v1',\n"
                 "  'status' => ENV.fetch('RECORD_STATUS'), 'target' => 'existing-public-website',\n"
-                "  'environment' => 'staging-do', 'kind' => 'r2-prerequisite-apply',\n"
-                "  'effect' => 'provider-mutation', 'policyCommitSha' => args.fetch('--policy-sha'),\n"
+                "  'environment' => 'staging-do', 'kind' => ENV.fetch('RECORD_KIND'),\n"
+                "  'effect' => ENV.fetch('RECORD_EFFECT'), 'policyCommitSha' => args.fetch('--policy-sha'),\n"
                 "  'diffBaseSha' => args.fetch('--diff-base-sha'), 'candidateSha' => args.fetch('--candidate-sha'),\n"
                 "  'operationDigest' => 'sha256:' + 'a' * 64,\n"
-                "  'receipts' => {'source' => {'artifactDigest' => 'sha256:' + 'b' * 64},\n"
+                "  'receipts' => {'source' => {'type' => ENV.fetch('SOURCE_TYPE'),\n"
+                "                            'artifactDigest' => JSON.parse(ENV.fetch('ARTIFACT_DIGEST_JSON'))},\n"
                 "                 'operator' => {'sha256' => 'c' * 64}},\n"
-                "  'servingChange' => false, 'runtimeMutation' => true,\n"
+                "  'servingChange' => ENV.fetch('RECORD_EFFECT') == 'public-serving',\n"
+                "  'runtimeMutation' => ['provider-mutation', 'public-serving'].include?(ENV.fetch('RECORD_EFFECT')),\n"
                 "  'environmentReadinessAssessed' => false, 'productAccepted' => false}\n"
                 "File.write(args.fetch('--record'), JSON.generate(record))\n"
                 "puts record.fetch('kind')\n",
@@ -778,7 +789,9 @@ class WebsiteNativeEvidenceStepTest(unittest.TestCase):
                 "EVENT_NAME": "pull_request", "HEAD_REF": "website/r2", "HEAD_REPOSITORY": "Mindburn-Labs/gitops-platform",
                 "BASE_REF": "main", "DEFAULT_BRANCH": "main",
                 "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40,
-                "POLICY_SHA": "a" * 40, "EXPECTED_KIND": "r2-prerequisite-apply",
+                "POLICY_SHA": "a" * 40, "EXPECTED_KIND": kind,
+                "RECORD_KIND": kind, "RECORD_EFFECT": effect,
+                "SOURCE_TYPE": source_type, "ARTIFACT_DIGEST_JSON": artifact_digest_json,
                 "RECORD_STATUS": record_status, "LIVE_SHA": live_sha,
             })
 
@@ -796,6 +809,24 @@ class WebsiteNativeEvidenceStepTest(unittest.TestCase):
         for overrides in ({"token": ""}, {"record_status": "LOCAL_MATCH"}, {"live_sha": "c" * 40}):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step(**overrides).returncode, 0)
+
+    def test_secret_operations_accept_native_absence_and_refuse_fabricated_artifacts(self) -> None:
+        for kind in ("origin-secret-projection", "script-publisher-credential-preparation"):
+            with self.subTest(kind=kind):
+                valid = self.run_step(kind=kind)
+                self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
+                fabricated = self.run_step(kind=kind, artifact_digest_json=json.dumps("sha256:" + "b" * 64))
+                self.assertNotEqual(fabricated.returncode, 0)
+                wrong_type = self.run_step(kind=kind, source_type="controller-publish")
+                self.assertNotEqual(wrong_type.returncode, 0)
+
+    def test_provider_and_public_operations_require_native_artifact_digest(self) -> None:
+        for kind in ("r2-prerequisite-apply", "website-public-release"):
+            with self.subTest(kind=kind):
+                valid = self.run_step(kind=kind)
+                self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
+                missing = self.run_step(kind=kind, artifact_digest_json="null")
+                self.assertNotEqual(missing.returncode, 0)
 
 
 class DefaultMainPolicyTest(unittest.TestCase):

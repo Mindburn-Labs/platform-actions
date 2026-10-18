@@ -522,7 +522,15 @@ jobs:
              .policyCommitSha == $policy and .diffBaseSha == $base and
              .candidateSha == $candidate and
              (.operationDigest | test("^sha256:[0-9a-f]{64}$")) and
-             (.receipts.source.artifactDigest | test("^sha256:[0-9a-f]{64}$")) and
+             (if .effect == "secret-preparation" or .effect == "secret-projection" then
+                .receipts.source.type == "gitops-ci" and .receipts.source.artifactDigest == null
+              elif .effect == "provider-mutation" then
+                .receipts.source.type == "controller-publish" and
+                (.receipts.source.artifactDigest | if type == "string" then test("^sha256:[0-9a-f]{64}$") else false end)
+              else
+                .receipts.source.type == "retained-release" and
+                (.receipts.source.artifactDigest | if type == "string" then test("^sha256:[0-9a-f]{64}$") else false end)
+              end) and
              (.receipts.operator.sha256 | test("^[0-9a-f]{64}$")) and
              .servingChange == (.effect == "public-serving") and
              .runtimeMutation == (.effect == "provider-mutation" or .effect == "public-serving") and
