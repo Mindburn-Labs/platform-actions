@@ -3,7 +3,7 @@
 Reusable GitHub Actions workflows that other Mindburn repos call through
 `workflow_call`. The v2 set is `ci.yml`, `auto-tag.yml` and
 `release-image.yml`. New callers pin the protected full-version tag
-`@v2.0.3`; existing `@v2` callers remain on that legacy ref until their
+`@v2.0.4`; existing `@v2` callers remain on that legacy ref until their
 workflows migrate. `agent-preflight.yml`,
 `doc-fingerprint-guard.yml` and `production-readiness.yml` are deprecated and
 kept for their remaining callers.
