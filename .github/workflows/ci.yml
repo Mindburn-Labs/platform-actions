@@ -316,12 +316,14 @@ jobs:
         run: |
           [[ "$(git -C candidate rev-parse HEAD)" == "${CANDIDATE_SHA}" ]] || exit 1
           changed_file="$(mktemp)"
+          # Show both sides of a move so deleting a target-cluster file cannot
+          # be hidden by a destination outside that cluster.
           if [[ "${EVENT_NAME}" == pull_request ]]; then
-            git -C candidate diff --name-only -z "${BASE_SHA}...${CANDIDATE_SHA}" >"${changed_file}" || {
+            git -C candidate diff --no-renames --name-only -z "${BASE_SHA}...${CANDIDATE_SHA}" >"${changed_file}" || {
               echo "::error::cannot classify changed cluster paths"; exit 1;
             }
           else
-            git -C candidate diff --name-only -z "${BASE_SHA}" "${CANDIDATE_SHA}" >"${changed_file}" || {
+            git -C candidate diff --no-renames --name-only -z "${BASE_SHA}" "${CANDIDATE_SHA}" >"${changed_file}" || {
               echo "::error::cannot classify changed cluster paths"; exit 1;
             }
           fi

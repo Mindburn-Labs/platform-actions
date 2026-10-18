@@ -337,8 +337,9 @@ class DependabotAutoMergeTest(unittest.TestCase):
 class ReleaseReadinessTargetTest(unittest.TestCase):
     SCRIPT = step_script("ci.yml", "Identify exact promotion target")
 
-    def classify(self, changed_path: str, branch: str, *, base_sha: str | None = None,
-                 event: str = "pull_request",
+    def classify(self, changed_path: str | None, branch: str, *, base_sha: str | None = None,
+                 event: str = "pull_request", move: tuple[str, str] | None = None,
+                 delete: str | None = None,
                  head_repository: str = "Mindburn-Labs/gitops-platform") -> tuple[int, str, str]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -347,15 +348,24 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
             git(candidate, "init", "-q")
             git(candidate, "config", "user.email", "readiness-test@example.invalid")
             git(candidate, "config", "user.name", "Readiness Test")
-            for name in ("README.md", "clusters/staging-do/pin.yaml", "clusters/production-do/pin.yaml"):
+            for name in ("README.md", "clusters/staging-do/pin.yaml",
+                         "clusters/staging-do/odd\npin.yaml", "clusters/production-do/pin.yaml"):
                 path = candidate / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("base\n", encoding="utf-8")
+                path.write_text(f"{name}\n", encoding="utf-8")
             git(candidate, "add", ".")
             git(candidate, "commit", "-qm", "base")
             base = git(candidate, "rev-parse", "HEAD")
-            (candidate / changed_path).write_text("changed\n", encoding="utf-8")
-            git(candidate, "add", ".")
+            if move:
+                source, destination = (candidate / name for name in move)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source.rename(destination)
+            elif delete:
+                (candidate / delete).unlink()
+            else:
+                assert changed_path is not None
+                (candidate / changed_path).write_text("changed\n", encoding="utf-8")
+            git(candidate, "add", "-A")
             git(candidate, "commit", "-qm", "candidate")
             head = git(candidate, "rev-parse", "HEAD")
             output = root / "output"
@@ -394,10 +404,46 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("unrelated path", message)
 
+    def test_move_out_of_staging_cannot_look_like_docs_only(self) -> None:
+        code, _, message = self.classify(None, "maintenance/move-probe",
+                                         move=("clusters/staging-do/pin.yaml", "docs/probe.yaml"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("target cluster changes require", message)
+
+    def test_move_into_staging_is_classified(self) -> None:
+        code, _, message = self.classify(None, "maintenance/move-readme",
+                                         move=("README.md", "clusters/staging-do/readme.yaml"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("target cluster changes require", message)
+
+    def test_cross_environment_move_cannot_hide_source_deletion(self) -> None:
+        code, _, message = self.classify(None, "promote/production-cp-v1",
+                                         move=("clusters/staging-do/pin.yaml", "clusters/production-do/staging-pin.yaml"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("unrelated path", message)
+
+    def test_target_deletion_is_classified(self) -> None:
+        code, _, message = self.classify(None, "maintenance/delete-pin", delete="clusters/staging-do/pin.yaml")
+        self.assertNotEqual(code, 0)
+        self.assertIn("target cluster changes require", message)
+
+    def test_move_with_unusual_filename_cannot_hide_source_deletion(self) -> None:
+        code, _, message = self.classify(None, "maintenance/move-odd",
+                                         move=("clusters/staging-do/odd\npin.yaml", "docs/odd\npin.yaml"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("target cluster changes require", message)
+
     def test_merge_group_classifies_target_with_unusual_filename(self) -> None:
         code, output, message = self.classify("clusters/staging-do/odd\npin.yaml", "", event="merge_group")
         self.assertEqual(code, 0, message)
         self.assertEqual(output, "targets=staging-do\n")
+
+    def test_merge_group_cross_environment_move_checks_both(self) -> None:
+        code, output, message = self.classify(None, "", event="merge_group",
+                                              move=("clusters/staging-do/pin.yaml", "clusters/production-do/staging-pin.yaml"))
+        self.assertEqual(code, 0, message)
+        self.assertEqual(set(output.strip().removeprefix("targets=").split()),
+                         {"staging-do", "production-do"})
 
     def test_failed_diff_cannot_look_like_empty_target(self) -> None:
         code, _, message = self.classify("README.md", "feature/readme", base_sha="0" * 40)
