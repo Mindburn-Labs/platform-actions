@@ -18,7 +18,8 @@
 #   release-readiness  exact GitOps promotion or a frozen staging operation.
 #                     Promotion uses the verified default-main evaluator and source-owned
 #                     signed evidence. Finite operations use independently
-#                     resolved default-main policy and no org read token.
+#                     resolved default-main policy. Website operations verify
+#                     native source and operator custody in a separate step.
 #   dependency-scan pull requests and merge groups only: fails on a HIGH or
 #                   CRITICAL vulnerability that is present at head and absent
 #                   at base. Inherited findings are Dependabot's job.
@@ -413,7 +414,7 @@ jobs:
             return 1
           }
           validate_website_operation() {
-            local output expected_effect
+            local output
             if output="$(ruby trusted/scripts/validate-website-operation.rb \
                 --policy-repo trusted --diff-base-repo gate --candidate-repo candidate \
                 --policy-sha "${POLICY_SHA}" --diff-base-sha "${BASE_SHA}" \
@@ -421,37 +422,15 @@ jobs:
                 --head-ref "${HEAD_REF}" --head-repository "${HEAD_REPOSITORY}" \
                 --repository "${GITHUB_REPOSITORY}" --base-ref "${BASE_REF}" \
                 --default-branch "${DEFAULT_BRANCH}" \
-                --record "${RUNNER_TEMP}/website-operation.json" \
+                --inspect-local \
                 2>"${RUNNER_TEMP}/website-operation-attempt.log")"; then
               case "${output}" in
-                r2-writer-credential-preparation|script-publisher-credential-preparation)
-                  expected_effect=secret-preparation ;;
-                origin-secret-projection|r2-writer-secret-projection|script-publisher-secret-projection|turnstile-secret-projection)
-                  expected_effect=secret-projection ;;
-                r2-prerequisite-apply|formation-claim-bootstrap|turnstile-binding-activation)
-                  expected_effect=provider-mutation ;;
-                website-public-release)
-                  expected_effect=public-serving ;;
+                r2-writer-credential-preparation|script-publisher-credential-preparation|\
+                origin-secret-projection|r2-writer-secret-projection|script-publisher-secret-projection|\
+                turnstile-secret-projection|r2-prerequisite-apply|formation-claim-bootstrap|website-public-release) ;;
                 *) echo "::error::trusted website validator returned an unknown kind"; return 1 ;;
               esac
-              jq -e --arg kind "${output}" --arg effect "${expected_effect}" \
-                --arg policy "${POLICY_SHA}" --arg base "${BASE_SHA}" \
-                --arg candidate "${CANDIDATE_SHA}" \
-                '.schema == "gitops-website-operation-validation-v1" and
-                 .status == "VALIDATED" and .target == "existing-public-website" and
-                 .environment == "staging-do" and .kind == $kind and .effect == $effect and
-                 .policyCommitSha == $policy and .diffBaseSha == $base and
-                 .candidateSha == $candidate and
-                 (.operationDigest | test("^sha256:[0-9a-f]{64}$")) and
-                 (.receipts.source.sha256 | test("^[0-9a-f]{64}$")) and
-                 (.receipts.operator.sha256 | test("^[0-9a-f]{64}$")) and
-                 .servingChange == ($effect == "public-serving") and
-                 .runtimeMutation == ($effect == "provider-mutation" or $effect == "public-serving") and
-                 .environmentReadinessAssessed == false and .productAccepted == false' \
-                "${RUNNER_TEMP}/website-operation.json" >/dev/null || {
-                echo "::error::trusted website validator returned an invalid record"; return 1;
-              }
-              printf 'targets=\noperation_kind=%s\noperation_target=existing-public-website\n' "${output}" >>"${GITHUB_OUTPUT}"
+              printf 'targets=\noperation_kind=%s\noperation_target=existing-public-website\nwebsite_operation=yes\n' "${output}" >>"${GITHUB_OUTPUT}"
               return 0
             fi
             return 1
@@ -505,6 +484,53 @@ jobs:
           current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           [[ "${current_sha}" == "${POLICY_SHA}" ]] || {
             echo "::error::default main moved after operation validation"; exit 1;
+          }
+      - name: Validate native website operation evidence
+        if: steps.target.outputs.website_operation == 'yes'
+        env:
+          WEBSITE_SOURCE_GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          POLICY_SHA: ${{ steps.policy.outputs.sha }}
+          EXPECTED_KIND: ${{ steps.target.outputs.operation_kind }}
+        run: |
+          set -euo pipefail
+          ruby trusted/scripts/validate-website-operation.rb \
+            --policy-repo trusted --diff-base-repo gate --candidate-repo candidate \
+            --policy-sha "${POLICY_SHA}" --diff-base-sha "${BASE_SHA}" \
+            --candidate-sha "${CANDIDATE_SHA}" --event "${EVENT_NAME}" \
+            --head-ref "${HEAD_REF}" --head-repository "${HEAD_REPOSITORY}" \
+            --repository "${GITHUB_REPOSITORY}" --base-ref "${BASE_REF}" \
+            --default-branch "${DEFAULT_BRANCH}" \
+            --record "${RUNNER_TEMP}/website-operation.json"
+          jq -e --arg kind "${EXPECTED_KIND}" --arg policy "${POLICY_SHA}" \
+            --arg base "${BASE_SHA}" --arg candidate "${CANDIDATE_SHA}" \
+            '.schema == "gitops-website-operation-validation-v1" and
+             .status == "VALIDATED" and .target == "existing-public-website" and
+             .environment == "staging-do" and .kind == $kind and
+             .effect == (if $kind == "website-public-release" then "public-serving"
+                        elif $kind == "r2-prerequisite-apply" or $kind == "formation-claim-bootstrap" then "provider-mutation"
+                        elif $kind == "r2-writer-credential-preparation" or
+                             $kind == "script-publisher-credential-preparation" then "secret-preparation"
+                        else "secret-projection" end) and
+             .policyCommitSha == $policy and .diffBaseSha == $base and
+             .candidateSha == $candidate and
+             (.operationDigest | test("^sha256:[0-9a-f]{64}$")) and
+             (.receipts.source.artifactDigest | test("^sha256:[0-9a-f]{64}$")) and
+             (.receipts.operator.sha256 | test("^[0-9a-f]{64}$")) and
+             .servingChange == (.effect == "public-serving") and
+             .runtimeMutation == (.effect == "provider-mutation" or .effect == "public-serving") and
+             .environmentReadinessAssessed == false and .productAccepted == false' \
+            "${RUNNER_TEMP}/website-operation.json" >/dev/null
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${current_sha}" == "${POLICY_SHA}" ]] || {
+            echo "::error::default main moved after website evidence validation"; exit 1;
           }
       - name: Read source-owned evidence
         if: steps.target.outputs.targets != ''

@@ -407,12 +407,21 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
             website_script = root / "trusted" / "scripts" / "validate-website-operation.rb"
             website_script.write_text(
                 "require 'json'\n"
+                "inspect = ARGV.delete('--inspect-local')\n"
                 "args = ARGV.each_slice(2).to_h\n"
                 "File.write(ENV.fetch('WEBSITE_VALIDATOR_LOG'), JSON.generate(args))\n"
                 "kind = ENV.fetch('WEBSITE_STUB_KIND')\n"
                 "if kind.empty?\n"
                 "  warn '::error::website operation refused: fixture'\n"
                 "  exit 1\n"
+                "end\n"
+                "if inspect\n"
+                "  if ENV['INVALID_WEBSITE_RECORD'] == 'true'\n"
+                "    warn '::error::website operation refused: invalid local match'\n"
+                "    exit 1\n"
+                "  end\n"
+                "  puts kind\n"
+                "  exit 0\n"
                 "end\n"
                 "effect = case kind\n"
                 "  when 'origin-secret-projection' then 'secret-projection'\n"
@@ -578,7 +587,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
             "clusters/staging-do/website-origin.sops.yaml", "website/origin-projection",
             website_kind="origin-secret-projection", return_website_argv=True)
         self.assertEqual(code, 0, message)
-        self.assertEqual(output, "targets=\noperation_kind=origin-secret-projection\noperation_target=existing-public-website\n")
+        self.assertEqual(output, "targets=\noperation_kind=origin-secret-projection\noperation_target=existing-public-website\nwebsite_operation=yes\n")
         self.assertEqual(argv["--policy-repo"], "trusted")
         self.assertEqual(argv["--diff-base-repo"], "gate")
         self.assertEqual(argv["--candidate-repo"], "candidate")
@@ -589,7 +598,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
             "clusters/staging-do/website-r2-test/r2.json", "", event="merge_group",
             website_kind="r2-prerequisite-apply", return_website_argv=True)
         self.assertEqual(code, 0, message)
-        self.assertEqual(output, "targets=\noperation_kind=r2-prerequisite-apply\noperation_target=existing-public-website\n")
+        self.assertEqual(output, "targets=\noperation_kind=r2-prerequisite-apply\noperation_target=existing-public-website\nwebsite_operation=yes\n")
         self.assertEqual(argv["--base-ref"], "refs/heads/main")
 
     def test_exact_public_website_serving_has_separate_effect_record(self) -> None:
@@ -599,13 +608,13 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertEqual(code, 0, message)
         self.assertIn("operation_target=existing-public-website", output)
 
-    def test_invalid_website_record_refuses_pr(self) -> None:
+    def test_invalid_website_local_match_refuses_pr(self) -> None:
         code, output, message = self.classify(
             "clusters/staging-do/website-origin.sops.yaml", "website/origin-projection",
             website_kind="origin-secret-projection", invalid_website_record=True)
         self.assertNotEqual(code, 0)
         self.assertEqual(output, "")
-        self.assertIn("invalid record", message)
+        self.assertIn("invalid local match", message)
 
     def test_unrecognized_website_kind_refuses_pr(self) -> None:
         code, output, message = self.classify(
@@ -730,6 +739,63 @@ class FullReadinessTrustTest(unittest.TestCase):
             self.assertIn('"--policy-repo","trusted"', args)
             self.assertIn('"--repo","candidate"', args)
             self.assertIn('"--env","staging-do"', args)
+
+
+class WebsiteNativeEvidenceStepTest(unittest.TestCase):
+    SCRIPT = step_script("ci.yml", "Validate native website operation evidence")
+
+    def run_step(self, *, token: str = "fixture-org-read", record_status: str = "VALIDATED",
+                 live_sha: str = "a" * 40) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted = root / "trusted" / "scripts"
+            trusted.mkdir(parents=True)
+            (trusted / "validate-website-operation.rb").write_text(
+                "require 'json'\n"
+                "abort 'missing website-only token' if ENV['WEBSITE_SOURCE_GH_TOKEN'].to_s.empty?\n"
+                "args = ARGV.each_slice(2).to_h\n"
+                "record = {'schema' => 'gitops-website-operation-validation-v1',\n"
+                "  'status' => ENV.fetch('RECORD_STATUS'), 'target' => 'existing-public-website',\n"
+                "  'environment' => 'staging-do', 'kind' => 'r2-prerequisite-apply',\n"
+                "  'effect' => 'provider-mutation', 'policyCommitSha' => args.fetch('--policy-sha'),\n"
+                "  'diffBaseSha' => args.fetch('--diff-base-sha'), 'candidateSha' => args.fetch('--candidate-sha'),\n"
+                "  'operationDigest' => 'sha256:' + 'a' * 64,\n"
+                "  'receipts' => {'source' => {'artifactDigest' => 'sha256:' + 'b' * 64},\n"
+                "                 'operator' => {'sha256' => 'c' * 64}},\n"
+                "  'servingChange' => false, 'runtimeMutation' => true,\n"
+                "  'environmentReadinessAssessed' => false, 'productAccepted' => false}\n"
+                "File.write(args.fetch('--record'), JSON.generate(record))\n"
+                "puts record.fetch('kind')\n",
+                encoding="utf-8",
+            )
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"${LIVE_SHA}\"\n", encoding="utf-8")
+            gh.chmod(0o755)
+            return run_bash(self.SCRIPT, root, {
+                "PATH": f"{root}:{os.environ['PATH']}", "RUNNER_TEMP": str(root),
+                "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "WEBSITE_SOURCE_GH_TOKEN": token, "GH_TOKEN": "fixture-repo-token",
+                "EVENT_NAME": "pull_request", "HEAD_REF": "website/r2", "HEAD_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "BASE_REF": "main", "DEFAULT_BRANCH": "main",
+                "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40,
+                "POLICY_SHA": "a" * 40, "EXPECTED_KIND": "r2-prerequisite-apply",
+                "RECORD_STATUS": record_status, "LIVE_SHA": live_sha,
+            })
+
+    def test_only_website_step_receives_cross_repository_token(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        classifier = workflow.split("      - name: Identify exact promotion target\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("--inspect-local", classifier)
+        self.assertNotIn("MINDBURN_ORG_READ_TOKEN", classifier)
+        self.assertIn("WEBSITE_SOURCE_GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}", workflow)
+        self.assertIn("if: steps.target.outputs.website_operation == 'yes'", workflow)
+        result = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_missing_token_failed_record_and_moved_main_refuse(self) -> None:
+        for overrides in ({"token": ""}, {"record_status": "LOCAL_MATCH"}, {"live_sha": "c" * 40}):
+            with self.subTest(overrides=overrides):
+                self.assertNotEqual(self.run_step(**overrides).returncode, 0)
 
 
 class DefaultMainPolicyTest(unittest.TestCase):
