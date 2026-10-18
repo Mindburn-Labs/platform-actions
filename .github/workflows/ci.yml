@@ -33,6 +33,10 @@ name: CI v2
 on:
   workflow_call:
     inputs:
+      check-timeout-minutes:
+        description: Maximum duration of the make check job, including setup and extra commands, in minutes.
+        type: number
+        default: 60
       setup-commands:
         description: Shell commands run after toolchain setup and before `make check` (for example `npm ci`).
         type: string
@@ -62,7 +66,7 @@ jobs:
   check:
     name: make check
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.check-timeout-minutes }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
