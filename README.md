@@ -116,7 +116,7 @@ raise the caller's token permissions.
 | --- | --- | --- |
 | `setup-commands` | `''` | Shell run after toolchain setup, before `make check` (for example `npm ci`). |
 | `extra-commands` | `''` | Shell run after `make check`, in the same job. |
-| secret `MINDBURN_ORG_READ_TOKEN` | none | Only for `go.mod` `replace ... => ../<repo>`: clones those sibling repositories. |
+| secret `MINDBURN_ORG_READ_TOKEN` | none | Reads sibling Go repositories when needed. GitOps promotion readiness also needs read access to `helm-rollout-evidence` and the named producer Actions runs/artifacts. |
 
 Jobs:
 
@@ -131,10 +131,17 @@ Jobs:
   advisory (CVSS 7.0 or more, or rated HIGH/CRITICAL by GitHub) that the
   change adds. Inherited findings are reported as a notice and left to
   Dependabot.
+- `release readiness`: runs only for `gitops-platform` promotion PRs and merge
+  groups. It checks out the evaluator and policy from the trusted base, reads
+  the exact candidate cluster tree as data, and verifies signed source-owned
+  RC-01 through RC-23 evidence. It fails when the token, evidence, producer,
+  or target binding is absent. The candidate's scripts never run with the
+  evidence token. Unrelated repositories skip this job.
 - `gate`: needs every other job and runs with `if: always()`. `make check`
-  must succeed. Only `dependency-scan` may skip, on events other than
-  `pull_request` and `merge_group`, matching its job condition. Missing jobs,
-  other skips, failures and cancellations fail the gate.
+  must succeed. `dependency-scan` may skip outside PRs and merge groups;
+  `release-readiness` may skip outside GitOps promotion PRs and GitOps merge
+  groups. A required readiness skip, missing job, failure, or cancellation
+  fails the sole `ci / gate` status.
 
 ### `auto-tag.yml`
 
