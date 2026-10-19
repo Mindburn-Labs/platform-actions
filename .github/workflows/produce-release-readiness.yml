@@ -1,0 +1,199 @@
+name: Source release readiness RC-04
+
+# The observation/signing job is contained to protected main. Pull requests
+# run only the credential-free focused collector tests.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/produce-release-readiness.yml
+      - scripts/collect-release-readiness.py
+      - tests/test_release_readiness_collector.py
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Exact GitOps environment
+        type: choice
+        options: [qa-arm, staging-do, production-do]
+        default: staging-do
+        required: true
+      candidate_sha:
+        description: Exact 40-character GitOps candidate commit
+        type: string
+        required: true
+
+  repository_dispatch:
+    types: [release-readiness-request]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Focused collector negative controls
+        run: python3 -B -m unittest discover -s tests -p test_release_readiness_collector.py
+
+  produce:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: release-readiness-signing
+    steps:
+      - name: Checkout source owner at this run
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate exact target and protected source branch
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ENV: ${{ inputs.environment || github.event.client_payload.environment }}
+          REQUEST_SHA: ${{ inputs.candidate_sha || github.event.client_payload.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)" = main
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/branches/main" --jq .protected)" = true
+          python3 - <<'PY'
+          import os, re
+          environment = os.environ['REQUEST_ENV']
+          candidate = os.environ['REQUEST_SHA']
+          if environment not in {'qa-arm', 'staging-do', 'production-do'} or not re.fullmatch('[0-9a-f]{40}', candidate):
+              raise SystemExit('exact candidate environment and SHA required')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'environment={environment}\ncandidate_sha={candidate}\n')
+          PY
+
+      - name: Resolve independently protected GitOps policy
+        id: policy
+        env:
+          GH_TOKEN: ${{ secrets.READINESS_GITOPS_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/Mindburn-Labs/gitops-platform --jq .default_branch)" = main
+          gh api repos/Mindburn-Labs/gitops-platform/branches/main > "${RUNNER_TEMP}/readiness-policy-branch.json"
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          branch = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'readiness-policy-branch.json').read_text())
+          sha = branch.get('commit', {}).get('sha', '')
+          if branch.get('protected') is not True or not re.fullmatch('[0-9a-f]{40}', sha):
+              raise SystemExit('protected GitOps main policy required')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'sha={sha}\n')
+          PY
+
+      - name: Checkout candidate as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Mindburn-Labs/gitops-platform
+          ref: ${{ steps.request.outputs.candidate_sha }}
+          token: ${{ secrets.READINESS_GITOPS_READ_TOKEN }}
+          path: .readiness-candidate
+          persist-credentials: false
+      - name: Checkout trusted policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Mindburn-Labs/gitops-platform
+          ref: ${{ steps.policy.outputs.sha }}
+          token: ${{ secrets.READINESS_GITOPS_READ_TOKEN }}
+          path: .readiness-policy
+          persist-credentials: false
+      - name: Checkout immutable shared packager
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Mindburn-Labs/helm-rollout-evidence
+          ref: cdfb169f2df22e6443180c9bed8cb96c0f76cce2
+          token: ${{ secrets.READINESS_TOOLS_READ_TOKEN }}
+          path: .readiness-tools
+          persist-credentials: false
+
+      - name: Collect actual RC-04 observations
+        env:
+          READINESS_POSTURE_TOKEN: ${{ secrets.READINESS_POSTURE_TOKEN }}
+          TARGET_ENV: ${{ steps.request.outputs.environment }}
+        run: |
+          set -euo pipefail
+          python3 -B scripts/collect-release-readiness.py \
+            --candidate .readiness-candidate --environment "${TARGET_ENV}" \
+            --output "${RUNNER_TEMP}/RC-04.observation.json"
+
+      - name: Bind and validate raw evidence before upload
+        id: raw
+        env:
+          TARGET_ENV: ${{ steps.request.outputs.environment }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          python3 .readiness-tools/scripts/build_release_readiness_attestation.py bind \
+            --observation "${RUNNER_TEMP}/RC-04.observation.json" --raw "${RUNNER_TEMP}/RC-04.raw.json" \
+            --candidate .readiness-candidate --check RC-04 --environment "${TARGET_ENV}" --candidate-sha "${CANDIDATE_SHA}"
+          python3 .readiness-tools/scripts/build_release_readiness_attestation.py preflight \
+            --raw "${RUNNER_TEMP}/RC-04.raw.json" --candidate .readiness-candidate --check RC-04 \
+            --environment "${TARGET_ENV}" --candidate-sha "${CANDIDATE_SHA}" > "${RUNNER_TEMP}/RC-04.raw-metadata.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          metadata = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'RC-04.raw-metadata.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('name=' + metadata['raw_artifact_name'] + '\n')
+          PY
+      - name: Upload only the bound raw JSON
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.raw.outputs.name }}
+          path: ${{ runner.temp }}/RC-04.raw.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Verify uploaded bytes and sign exact record from external custody
+        id: attest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          READINESS_SIGNING_KEY: ${{ secrets.READINESS_SIGNING_KEY }}
+          TARGET_ENV: ${{ steps.request.outputs.environment }}
+          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
+          RAW_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          RAW_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export READINESS_KEY_PATH="${RUNNER_TEMP}/RC-04-signing-key.pem"
+          trap 'rm -f -- "${READINESS_KEY_PATH}"' EXIT
+          python3 - <<'PY'
+          import os
+          key = os.environ.get('READINESS_SIGNING_KEY', '')
+          if not key.strip():
+              raise SystemExit('external signing custody absent')
+          fd = os.open(os.environ['READINESS_KEY_PATH'], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+          with os.fdopen(fd, 'w') as output:
+              output.write(key)
+          PY
+          unset READINESS_SIGNING_KEY
+          python3 .readiness-tools/scripts/build_release_readiness_attestation.py attest \
+            --raw "${RUNNER_TEMP}/RC-04.raw.json" --candidate .readiness-candidate --policy .readiness-policy \
+            --check RC-04 --environment "${TARGET_ENV}" --candidate-sha "${CANDIDATE_SHA}" \
+            --artifact-id "${RAW_ARTIFACT_ID}" --artifact-digest "${RAW_ARTIFACT_DIGEST}" \
+            --signing-key "${READINESS_KEY_PATH}" --output "${RUNNER_TEMP}/RC-04-attestation" > "${RUNNER_TEMP}/RC-04.attestation-metadata.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          metadata = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'RC-04.attestation-metadata.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('name=' + metadata['attestation_artifact_name'] + '\n')
+          PY
+      - name: Upload record and detached signature after raw verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.attest.outputs.name }}
+          path: |
+            ${{ runner.temp }}/RC-04-attestation/RC-04.json
+            ${{ runner.temp }}/RC-04-attestation/RC-04.sig
+          if-no-files-found: error
+          retention-days: 7
