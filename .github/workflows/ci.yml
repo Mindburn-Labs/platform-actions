@@ -33,6 +33,10 @@ name: CI v2
 on:
   workflow_call:
     inputs:
+      check-runner:
+        description: Runner label for the make check job; pin an Ubuntu image when native dependencies require a stable distribution.
+        type: string
+        default: ubuntu-latest
       check-timeout-minutes:
         description: Maximum duration of the make check job, including setup and extra commands, in minutes.
         type: number
@@ -65,7 +69,7 @@ defaults:
 jobs:
   check:
     name: make check
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.check-runner }}
     timeout-minutes: ${{ inputs.check-timeout-minutes }}
     steps:
       - name: Check out the repository
