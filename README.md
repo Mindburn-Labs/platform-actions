@@ -114,7 +114,7 @@ raise the caller's token permissions.
 
 | Input / secret | Default | Meaning |
 | --- | --- | --- |
-| `check-runner` | `ubuntu-latest` | Runner label for the `make check` job. Callers whose native dependency setup needs a stable distribution can pin `ubuntu-24.04`; other jobs and required gates are unchanged. |
+| `check-runner` | `ubuntu-latest` | Hosted Ubuntu runner for `make check`: `ubuntu-latest` or `ubuntu-24.04`. Unsupported values fail on a hosted runner before checkout; they cannot select a custom or self-hosted runner. Other jobs and required gates are unchanged. |
 | `check-timeout-minutes` | `60` | Maximum duration of the `make check` job, including setup and extra commands. Available from `v2.0.8`; callers with measured longer gates can pass a larger positive integer. Required checks and cancellation handling are unchanged. |
 | `setup-commands` | `''` | Shell run after toolchain setup, before `make check` (for example `npm ci`). |
 | `extra-commands` | `''` | Shell run after `make check`, in the same job. |
