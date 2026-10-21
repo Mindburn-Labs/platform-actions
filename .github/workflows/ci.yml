@@ -440,18 +440,38 @@ jobs:
             fi
             return 1
           }
+          validate_operator_change() {
+            local output
+            if output="$(ruby trusted/scripts/validate-operator-change.rb \
+                --policy-repo trusted --diff-base-repo gate --candidate-repo candidate \
+                --policy-sha "${POLICY_SHA}" --diff-base-sha "${BASE_SHA}" \
+                --candidate-sha "${CANDIDATE_SHA}" --event "${EVENT_NAME}" \
+                --head-ref "${HEAD_REF}" --head-repository "${HEAD_REPOSITORY}" \
+                --repository "${GITHUB_REPOSITORY}" --base-ref "${BASE_REF}" \
+                --default-branch "${DEFAULT_BRANCH}" \
+                --inspect-local \
+                2>"${RUNNER_TEMP}/operator-change-attempt.log")"; then
+              [[ "${output}" == operator-change ]] || {
+                echo "::error::trusted operator-change validator returned an unknown kind"; return 1;
+              }
+              printf 'targets=\noperation_kind=operator-change\noperation_target=staging-do\noperator_change=yes\n' >>"${GITHUB_OUTPUT}"
+              return 0
+            fi
+            return 1
+          }
           if [[ "${EVENT_NAME}" == pull_request ]]; then
             if [[ "${HEAD_REF}" == promote/* || "${#targets[@]}" -gt 0 ]]; then
               [[ "${HEAD_REPOSITORY}" == "${GITHUB_REPOSITORY}" && "${BASE_REF}" == "${DEFAULT_BRANCH}" ]] || {
                 echo "::error::promotion PR must originate in this repository and target the default branch"; exit 1;
               }
               if [[ "${HEAD_REF}" != promote/* && "${unique_targets[*]}" == staging-do ]]; then
-                if validate_typed_operation || validate_website_operation; then
+                if validate_typed_operation || validate_website_operation || validate_operator_change; then
                   exit 0
                 fi
                 {
                   cat "${RUNNER_TEMP}/typed-operation-attempt.log"
                   cat "${RUNNER_TEMP}/website-operation-attempt.log"
+                  cat "${RUNNER_TEMP}/operator-change-attempt.log"
                   echo "::error::target cluster changes require an exact reviewed operation or a promote branch"
                 }
                 exit 1
@@ -473,7 +493,7 @@ jobs:
             fi
           else
             if [[ "${unique_targets[*]}" == staging-do ]]; then
-              if validate_typed_operation || validate_website_operation; then
+              if validate_typed_operation || validate_website_operation || validate_operator_change; then
                 exit 0
               fi
               echo "merge-group change is outside the finite operation permits; evaluating full readiness"
@@ -546,6 +566,48 @@ jobs:
           [[ "${current_sha}" == "${POLICY_SHA}" ]] || {
             echo "::error::default main moved after website evidence validation"; exit 1;
           }
+      - name: Validate operator-change evidence
+        if: steps.target.outputs.operator_change == 'yes'
+        env:
+          OPERATOR_CHANGE_GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          POLICY_SHA: ${{ steps.policy.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ruby trusted/scripts/validate-operator-change.rb \
+            --policy-repo trusted --diff-base-repo gate --candidate-repo candidate \
+            --policy-sha "${POLICY_SHA}" --diff-base-sha "${BASE_SHA}" \
+            --candidate-sha "${CANDIDATE_SHA}" --event "${EVENT_NAME}" \
+            --head-ref "${HEAD_REF}" --head-repository "${HEAD_REPOSITORY}" \
+            --repository "${GITHUB_REPOSITORY}" --base-ref "${BASE_REF}" \
+            --default-branch "${DEFAULT_BRANCH}" \
+            --record "${RUNNER_TEMP}/operator-change.json"
+          jq -e --arg policy "${POLICY_SHA}" --arg base "${BASE_SHA}" --arg candidate "${CANDIDATE_SHA}" \
+            '.schema == "gitops-operator-change-validation-v1" and
+             .status == "VALIDATED" and .kind == "operator-change" and
+             .environment == "staging-do" and
+             (.effect == "config-change" or .effect == "serving-change" or .effect == "removal") and
+             (.operationId | test("^[a-z0-9-]+-[0-9a-f]{8}$")) and
+             (.linear | test("^HELM-[0-9]+$")) and
+             .policyCommitSha == $policy and .diffBaseSha == $base and
+             .candidateSha == $candidate and
+             (.receipts.operator.repository == "Mindburn-Labs/helm-rollout-evidence") and
+             (.receipts.operator.sha256 | test("^[0-9a-f]{64}$")) and
+             .servingChange == (.effect == "serving-change") and
+             .runtimeMutation == (.effect == "serving-change" or .effect == "removal") and
+             .environmentReadinessAssessed == false and .productAccepted == false' \
+            "${RUNNER_TEMP}/operator-change.json" >/dev/null
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${current_sha}" == "${POLICY_SHA}" ]] || {
+            echo "::error::default main moved after operator-change evidence validation"; exit 1;
+          }
       - name: Read source-owned evidence
         if: steps.target.outputs.targets != ''
         continue-on-error: true
@@ -592,6 +654,7 @@ jobs:
           path: |
             ${{ runner.temp }}/typed-operation.json
             ${{ runner.temp }}/website-operation.json
+            ${{ runner.temp }}/operator-change.json
           if-no-files-found: error
 
   dependency-scan:
