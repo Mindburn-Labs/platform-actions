@@ -344,9 +344,11 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                  changed_paths: tuple[str, ...] | None = None,
                  typed_kind: str = "", invalid_record: bool = False,
                  website_kind: str = "", invalid_website_record: bool = False,
+                 operator_kind: str = "",
                  base_ref: str | None = None,
                  return_argv: bool = False,
-                 return_website_argv: bool = False) -> tuple[int, str, str] | tuple[int, str, str, dict]:
+                 return_website_argv: bool = False,
+                 return_operator_argv: bool = False) -> tuple[int, str, str] | tuple[int, str, str, dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             candidate = root / "candidate"
@@ -445,9 +447,25 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                 "puts kind\n",
                 encoding="utf-8",
             )
+            operator_script = root / "trusted" / "scripts" / "validate-operator-change.rb"
+            operator_script.write_text(
+                "require 'json'\n"
+                "inspect = ARGV.delete('--inspect-local')\n"
+                "args = ARGV.each_slice(2).to_h\n"
+                "File.write(ENV.fetch('OPERATOR_VALIDATOR_LOG'), JSON.generate(args))\n"
+                "kind = ENV.fetch('OPERATOR_STUB_KIND')\n"
+                "if kind.empty?\n"
+                "  warn '::error::operator change refused: fixture'\n"
+                "  exit 1\n"
+                "end\n"
+                "abort 'local classification cannot emit a validation record' unless inspect\n"
+                "puts kind\n",
+                encoding="utf-8",
+            )
             output = root / "output"
             validator_log = root / "validator-argv.json"
             website_validator_log = root / "website-validator-argv.json"
+            operator_validator_log = root / "operator-validator-argv.json"
             result = run_bash(self.SCRIPT, root, {
                 "EVENT_NAME": event, "HEAD_REF": branch,
                 "HEAD_REPOSITORY": head_repository,
@@ -461,6 +479,8 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                 "WEBSITE_VALIDATOR_LOG": str(website_validator_log),
                 "WEBSITE_STUB_KIND": website_kind,
                 "INVALID_WEBSITE_RECORD": str(invalid_website_record).lower(),
+                "OPERATOR_VALIDATOR_LOG": str(operator_validator_log),
+                "OPERATOR_STUB_KIND": operator_kind,
                 "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
                 "GITHUB_OUTPUT": str(output),
             })
@@ -469,6 +489,8 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
                 return (*values, json.loads(validator_log.read_text()) if validator_log.exists() else {})
             if return_website_argv:
                 return (*values, json.loads(website_validator_log.read_text()) if website_validator_log.exists() else {})
+            if return_operator_argv:
+                return (*values, json.loads(operator_validator_log.read_text()) if operator_validator_log.exists() else {})
             return values
 
     def test_regular_source_pr_passes_with_no_target(self) -> None:
@@ -593,6 +615,39 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertEqual(argv["--candidate-repo"], "candidate")
         self.assertEqual(argv["--event"], "pull_request")
 
+    def test_exact_operator_change_uses_trusted_main_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            None, "helm-999-remove-artheris-tenant", operator_kind="operator-change",
+            changed_paths=("clusters/staging-do/kustomization.yaml", "scripts/promote.rb"),
+            return_operator_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=operator-change\noperation_target=staging-do\noperator_change=yes\n")
+        self.assertEqual(argv["--policy-repo"], "trusted")
+        self.assertEqual(argv["--diff-base-repo"], "gate")
+        self.assertEqual(argv["--candidate-repo"], "candidate")
+        self.assertEqual(argv["--event"], "pull_request")
+        self.assertEqual(argv["--repository"], "Mindburn-Labs/gitops-platform")
+
+    def test_operator_change_merge_group_uses_trusted_main_validator(self) -> None:
+        code, output, message, argv = self.classify(
+            "clusters/staging-do/pin.yaml", "", event="merge_group",
+            operator_kind="operator-change", return_operator_argv=True)
+        self.assertEqual(code, 0, message)
+        self.assertEqual(output, "targets=\noperation_kind=operator-change\noperation_target=staging-do\noperator_change=yes\n")
+        self.assertEqual(argv["--base-ref"], "refs/heads/main")
+
+    def test_operator_change_validator_returning_another_kind_is_refused(self) -> None:
+        code, _, message = self.classify(
+            "clusters/staging-do/pin.yaml", "helm-999-remove-artheris-tenant", operator_kind="credential-preparation")
+        self.assertNotEqual(code, 0)
+        self.assertIn("operator-change validator returned an unknown kind", message)
+
+    def test_operator_change_cannot_rescue_a_promote_branch(self) -> None:
+        code, _, message = self.classify("clusters/production-do/pin.yaml", "promote/staging-cp-v1",
+                                         operator_kind="operator-change")
+        self.assertNotEqual(code, 0)
+        self.assertIn("unrelated path", message)
+
     def test_exact_website_provider_merge_group_uses_website_validator(self) -> None:
         code, output, message, argv = self.classify(
             "clusters/staging-do/website-r2-test/r2.json", "", event="merge_group",
@@ -707,6 +762,8 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
         self.assertNotIn("startsWith(github.event.pull_request.head.ref", job)
         self.assertIn("ruby trusted/scripts/validate-readiness-operation.rb", job)
         self.assertIn("ruby trusted/scripts/validate-website-operation.rb", job)
+        self.assertIn("ruby trusted/scripts/validate-operator-change.rb", job)
+        self.assertIn("${{ runner.temp }}/operator-change.json", job)
         self.assertIn("Verify default-main operation policy remains current", job)
         self.assertIn("github.event.merge_group.base_ref", job)
         self.assertIn("if: steps.target.outputs.targets != ''", job)
@@ -845,6 +902,93 @@ class WebsiteNativeEvidenceStepTest(unittest.TestCase):
         self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
         wrong = self.run_step(kind="turnstile-binding-activation", source_type="gitops-ci")
         self.assertNotEqual(wrong.returncode, 0)
+
+
+class OperatorChangeEvidenceStepTest(unittest.TestCase):
+    SCRIPT = step_script("ci.yml", "Validate operator-change evidence")
+
+    def run_step(self, *, token: str = "fixture-org-read", record_status: str = "VALIDATED",
+                 live_sha: str = "a" * 40, effect: str = "removal", kind: str = "operator-change",
+                 operation_id: str = "remove-artheris-tenant-1a2b3c4d", linear: str = "HELM-999",
+                 serving_change: str | None = None, runtime_mutation: str | None = None,
+                 product_accepted: str = "false", repository: str = "Mindburn-Labs/helm-rollout-evidence",
+                 ) -> subprocess.CompletedProcess[str]:
+        serving_change = serving_change or ("true" if effect == "serving-change" else "false")
+        runtime_mutation = runtime_mutation or ("true" if effect in ("serving-change", "removal") else "false")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trusted = root / "trusted" / "scripts"
+            trusted.mkdir(parents=True)
+            (trusted / "validate-operator-change.rb").write_text(
+                "require 'json'\n"
+                "abort 'missing operator-change token' if ENV['OPERATOR_CHANGE_GH_TOKEN'].to_s.empty?\n"
+                "abort 'local classification cannot emit a validation record' if ARGV.include?('--inspect-local')\n"
+                "args = ARGV.each_slice(2).to_h\n"
+                "record = {'schema' => 'gitops-operator-change-validation-v1',\n"
+                "  'status' => ENV.fetch('RECORD_STATUS'), 'kind' => ENV.fetch('RECORD_KIND'),\n"
+                "  'effect' => ENV.fetch('RECORD_EFFECT'), 'operationId' => ENV.fetch('RECORD_ID'),\n"
+                "  'environment' => 'staging-do', 'linear' => ENV.fetch('RECORD_LINEAR'),\n"
+                "  'policyCommitSha' => args.fetch('--policy-sha'),\n"
+                "  'diffBaseSha' => args.fetch('--diff-base-sha'), 'candidateSha' => args.fetch('--candidate-sha'),\n"
+                "  'changedPaths' => ['clusters/staging-do/kustomization.yaml'],\n"
+                "  'renderDelta' => {'added' => [], 'modified' => [], 'removed' => []},\n"
+                "  'receipts' => {'operator' => {'repository' => ENV.fetch('RECORD_REPOSITORY'),\n"
+                "                                'commitSha' => 'd' * 40,\n"
+                "                                'evidencePath' => 'operator-changes/' + ENV.fetch('RECORD_ID') + '.json',\n"
+                "                                'sha256' => 'c' * 64}},\n"
+                "  'servingChange' => ENV.fetch('SERVING_CHANGE') == 'true',\n"
+                "  'runtimeMutation' => ENV.fetch('RUNTIME_MUTATION') == 'true',\n"
+                "  'environmentReadinessAssessed' => false,\n"
+                "  'productAccepted' => ENV.fetch('PRODUCT_ACCEPTED') == 'true'}\n"
+                "File.write(args.fetch('--record'), JSON.generate(record))\n"
+                "puts record.fetch('kind')\n",
+                encoding="utf-8",
+            )
+            gh = root / "gh"
+            gh.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"${LIVE_SHA}\"\n", encoding="utf-8")
+            gh.chmod(0o755)
+            return run_bash(self.SCRIPT, root, {
+                "PATH": f"{root}:{os.environ['PATH']}", "RUNNER_TEMP": str(root),
+                "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "OPERATOR_CHANGE_GH_TOKEN": token, "GH_TOKEN": "fixture-repo-token",
+                "EVENT_NAME": "pull_request", "HEAD_REF": "helm-999-remove-artheris-tenant",
+                "HEAD_REPOSITORY": "Mindburn-Labs/gitops-platform",
+                "BASE_REF": "main", "DEFAULT_BRANCH": "main",
+                "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40, "POLICY_SHA": "a" * 40,
+                "RECORD_STATUS": record_status, "RECORD_KIND": kind, "RECORD_EFFECT": effect,
+                "RECORD_ID": operation_id, "RECORD_LINEAR": linear, "RECORD_REPOSITORY": repository,
+                "SERVING_CHANGE": serving_change, "RUNTIME_MUTATION": runtime_mutation,
+                "PRODUCT_ACCEPTED": product_accepted, "LIVE_SHA": live_sha,
+            })
+
+    def test_operator_change_step_is_gated_on_its_output_and_token(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        classifier = workflow.split("      - name: Identify exact promotion target\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("OPERATOR_CHANGE_GH_TOKEN", classifier)
+        self.assertIn("OPERATOR_CHANGE_GH_TOKEN: ${{ secrets.MINDBURN_ORG_READ_TOKEN }}", workflow)
+        self.assertIn("if: steps.target.outputs.operator_change == 'yes'", workflow)
+        for effect in ("config-change", "serving-change", "removal"):
+            with self.subTest(effect=effect):
+                result = self.run_step(effect=effect)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_operator_change_evidence_refusals(self) -> None:
+        cases = {
+            "missing token": {"token": ""},
+            "local match is not validation": {"record_status": "LOCAL_MATCH"},
+            "main moved": {"live_sha": "c" * 40},
+            "product acceptance claimed": {"product_accepted": "true"},
+            "unknown effect": {"effect": "experiment"},
+            "foreign kind": {"kind": "diagnostic-readback"},
+            "malformed operation id": {"operation_id": "remove-artheris-tenant"},
+            "missing linear key": {"linear": "none"},
+            "serving flag disagrees with effect": {"effect": "removal", "serving_change": "true"},
+            "runtime flag disagrees with effect": {"effect": "config-change", "runtime_mutation": "true"},
+            "receipt outside the evidence repository": {"repository": "Mindburn-Labs/gitops-platform"},
+        }
+        for name, overrides in cases.items():
+            with self.subTest(case=name):
+                self.assertNotEqual(self.run_step(**overrides).returncode, 0)
 
 
 class DefaultMainPolicyTest(unittest.TestCase):
