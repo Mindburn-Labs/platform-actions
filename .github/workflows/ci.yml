@@ -33,6 +33,10 @@ name: CI v2
 on:
   workflow_call:
     inputs:
+      check-runner:
+        description: Hosted runner for make check; ubuntu-latest or ubuntu-24.04.
+        type: string
+        default: ubuntu-latest
       check-timeout-minutes:
         description: Maximum duration of the make check job, including setup and extra commands, in minutes.
         type: number
@@ -65,9 +69,18 @@ defaults:
 jobs:
   check:
     name: make check
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.check-runner == 'ubuntu-24.04' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.check-timeout-minutes }}
     steps:
+      - name: Validate hosted check runner
+        env:
+          CHECK_RUNNER: ${{ inputs.check-runner }}
+        run: |
+          case "${CHECK_RUNNER}" in
+            ubuntu-latest|ubuntu-24.04) ;;
+            *) echo "::error::check-runner must be ubuntu-latest or ubuntu-24.04"; exit 1 ;;
+          esac
+
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
