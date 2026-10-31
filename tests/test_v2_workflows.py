@@ -617,7 +617,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
 
     def test_exact_operator_change_uses_trusted_main_validator(self) -> None:
         code, output, message, argv = self.classify(
-            None, "helm-999-remove-artheris-tenant", operator_kind="operator-change",
+            None, "helm-999-remove-example-tenant", operator_kind="operator-change",
             changed_paths=("clusters/staging-do/kustomization.yaml", "scripts/promote.rb"),
             return_operator_argv=True)
         self.assertEqual(code, 0, message)
@@ -638,7 +638,7 @@ class ReleaseReadinessTargetTest(unittest.TestCase):
 
     def test_operator_change_validator_returning_another_kind_is_refused(self) -> None:
         code, _, message = self.classify(
-            "clusters/staging-do/pin.yaml", "helm-999-remove-artheris-tenant", operator_kind="credential-preparation")
+            "clusters/staging-do/pin.yaml", "helm-999-remove-example-tenant", operator_kind="credential-preparation")
         self.assertNotEqual(code, 0)
         self.assertIn("operator-change validator returned an unknown kind", message)
 
@@ -909,7 +909,7 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
 
     def run_step(self, *, token: str = "fixture-org-read", record_status: str = "VALIDATED",
                  live_sha: str = "a" * 40, effect: str = "removal", kind: str = "operator-change",
-                 operation_id: str = "remove-artheris-tenant-1a2b3c4d",
+                 operation_id: str = "remove-example-tenant-1a2b3c4d",
                  issue: str | None = "Mindburn-Labs/helm-tracker#222", linear: str | None = None,
                  serving_change: str | None = None, runtime_mutation: str | None = None,
                  product_accepted: str = "false", repository: str = "Mindburn-Labs/helm-rollout-evidence",
@@ -954,7 +954,7 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
                 "PATH": f"{root}:{os.environ['PATH']}", "RUNNER_TEMP": str(root),
                 "GITHUB_REPOSITORY": "Mindburn-Labs/gitops-platform",
                 "OPERATOR_CHANGE_GH_TOKEN": token, "GH_TOKEN": "fixture-repo-token",
-                "EVENT_NAME": "pull_request", "HEAD_REF": "helm-999-remove-artheris-tenant",
+                "EVENT_NAME": "pull_request", "HEAD_REF": "helm-999-remove-example-tenant",
                 "HEAD_REPOSITORY": "Mindburn-Labs/gitops-platform",
                 "BASE_REF": "main", "DEFAULT_BRANCH": "main",
                 "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40, "POLICY_SHA": "a" * 40,
@@ -989,7 +989,7 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
             "product acceptance claimed": {"product_accepted": "true"},
             "unknown effect": {"effect": "experiment"},
             "foreign kind": {"kind": "diagnostic-readback"},
-            "malformed operation id": {"operation_id": "remove-artheris-tenant"},
+            "malformed operation id": {"operation_id": "remove-example-tenant"},
             "missing issue reference": {"issue": None},
             "bare issue number": {"issue": "#222"},
             "Linear key as the issue": {"issue": "HELM-1021"},
