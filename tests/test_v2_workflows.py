@@ -909,7 +909,8 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
 
     def run_step(self, *, token: str = "fixture-org-read", record_status: str = "VALIDATED",
                  live_sha: str = "a" * 40, effect: str = "removal", kind: str = "operator-change",
-                 operation_id: str = "remove-artheris-tenant-1a2b3c4d", linear: str = "HELM-999",
+                 operation_id: str = "remove-artheris-tenant-1a2b3c4d",
+                 issue: str | None = "Mindburn-Labs/helm-tracker#222", linear: str | None = None,
                  serving_change: str | None = None, runtime_mutation: str | None = None,
                  product_accepted: str = "false", repository: str = "Mindburn-Labs/helm-rollout-evidence",
                  ) -> subprocess.CompletedProcess[str]:
@@ -927,7 +928,7 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
                 "record = {'schema' => 'gitops-operator-change-validation-v1',\n"
                 "  'status' => ENV.fetch('RECORD_STATUS'), 'kind' => ENV.fetch('RECORD_KIND'),\n"
                 "  'effect' => ENV.fetch('RECORD_EFFECT'), 'operationId' => ENV.fetch('RECORD_ID'),\n"
-                "  'environment' => 'staging-do', 'linear' => ENV.fetch('RECORD_LINEAR'),\n"
+                "  'environment' => 'staging-do',\n"
                 "  'policyCommitSha' => args.fetch('--policy-sha'),\n"
                 "  'diffBaseSha' => args.fetch('--diff-base-sha'), 'candidateSha' => args.fetch('--candidate-sha'),\n"
                 "  'changedPaths' => ['clusters/staging-do/kustomization.yaml'],\n"
@@ -940,6 +941,8 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
                 "  'runtimeMutation' => ENV.fetch('RUNTIME_MUTATION') == 'true',\n"
                 "  'environmentReadinessAssessed' => false,\n"
                 "  'productAccepted' => ENV.fetch('PRODUCT_ACCEPTED') == 'true'}\n"
+                "record['issue'] = ENV.fetch('RECORD_ISSUE') if ENV.key?('RECORD_ISSUE')\n"
+                "record['linear'] = ENV.fetch('RECORD_LINEAR') if ENV.key?('RECORD_LINEAR')\n"
                 "File.write(args.fetch('--record'), JSON.generate(record))\n"
                 "puts record.fetch('kind')\n",
                 encoding="utf-8",
@@ -956,9 +959,11 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
                 "BASE_REF": "main", "DEFAULT_BRANCH": "main",
                 "BASE_SHA": "a" * 40, "CANDIDATE_SHA": "b" * 40, "POLICY_SHA": "a" * 40,
                 "RECORD_STATUS": record_status, "RECORD_KIND": kind, "RECORD_EFFECT": effect,
-                "RECORD_ID": operation_id, "RECORD_LINEAR": linear, "RECORD_REPOSITORY": repository,
+                "RECORD_ID": operation_id, "RECORD_REPOSITORY": repository,
                 "SERVING_CHANGE": serving_change, "RUNTIME_MUTATION": runtime_mutation,
                 "PRODUCT_ACCEPTED": product_accepted, "LIVE_SHA": live_sha,
+                **({"RECORD_ISSUE": issue} if issue is not None else {}),
+                **({"RECORD_LINEAR": linear} if linear is not None else {}),
             })
 
     def test_operator_change_step_is_gated_on_its_output_and_token(self) -> None:
@@ -972,6 +977,10 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
                 result = self.run_step(effect=effect)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def test_operator_change_record_from_a_pre_github_validator_stays_readable(self) -> None:
+        result = self.run_step(issue=None, linear="HELM-999")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
     def test_operator_change_evidence_refusals(self) -> None:
         cases = {
             "missing token": {"token": ""},
@@ -981,7 +990,11 @@ class OperatorChangeEvidenceStepTest(unittest.TestCase):
             "unknown effect": {"effect": "experiment"},
             "foreign kind": {"kind": "diagnostic-readback"},
             "malformed operation id": {"operation_id": "remove-artheris-tenant"},
-            "missing linear key": {"linear": "none"},
+            "missing issue reference": {"issue": None},
+            "bare issue number": {"issue": "#222"},
+            "Linear key as the issue": {"issue": "HELM-1021"},
+            "both issue and legacy key": {"linear": "HELM-999"},
+            "malformed legacy key": {"issue": None, "linear": "none"},
             "serving flag disagrees with effect": {"effect": "removal", "serving_change": "true"},
             "runtime flag disagrees with effect": {"effect": "config-change", "runtime_mutation": "true"},
             "receipt outside the evidence repository": {"repository": "Mindburn-Labs/gitops-platform"},

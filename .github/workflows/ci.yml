@@ -595,7 +595,9 @@ jobs:
              .environment == "staging-do" and
              (.effect == "config-change" or .effect == "serving-change" or .effect == "removal") and
              (.operationId | test("^[a-z0-9-]+-[0-9a-f]{8}$")) and
-             (.linear | test("^HELM-[0-9]+$")) and
+             (if has("issue") then (has("linear") | not) and
+                (.issue | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+#[1-9][0-9]*$"))
+              else (.linear | type == "string" and test("^HELM-[1-9][0-9]*$")) end) and
              .policyCommitSha == $policy and .diffBaseSha == $base and
              .candidateSha == $candidate and
              (.receipts.operator.repository == "Mindburn-Labs/helm-rollout-evidence") and
