@@ -175,7 +175,7 @@ agent_entrypoints:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = write_repo(
                 Path(tmpdir),
-                name="infra-live",
+                name="infra-clusters",
                 agent_yaml="""repo_type: platform
 owners:
   team: architecture-platform
