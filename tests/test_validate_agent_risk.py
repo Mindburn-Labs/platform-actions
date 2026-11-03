@@ -171,11 +171,38 @@ agent_entrypoints:
         self.assertTrue(any("secrets_required" in issue for issue in issues))
         self.assertTrue(any("protected_paths" in issue for issue in issues))
 
+    def test_infra_repo_underreporting_risk_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = write_repo(
+                Path(tmpdir),
+                name="infra-clusters",
+                agent_yaml="""repo_type: platform
+owners:
+  team: architecture-platform
+commands:
+  setup: make setup
+  test: make test
+  lint: make lint
+  build: make build
+risk:
+  external_writes: false
+  secrets_required: false
+  protected_paths:
+    - security/**
+agent_entrypoints:
+  default_task: make agent-context
+""",
+                surfaces=("environments/production/example.yaml", "secrets/example.env"),
+            )
+            issues = MODULE.validate_repo(repo_root)
+        self.assertTrue(any("external_writes" in issue for issue in issues))
+        self.assertTrue(any("secrets_required" in issue for issue in issues))
+
     def test_gitops_repo_with_truthful_risk_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = write_repo(
                 Path(tmpdir),
-                name="infra-live",
+                name="infra-clusters",
                 agent_yaml="""repo_type: platform
 owners:
   team: architecture-platform
