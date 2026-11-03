@@ -77,23 +77,35 @@ class HostedCheckRunnerTest(unittest.TestCase):
     SCRIPT = step_script("ci.yml", "Validate hosted check runner")
 
     def test_supported_hosted_runners_are_accepted(self) -> None:
-        for runner in ("ubuntu-latest", "ubuntu-24.04"):
+        for runner in ("ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"):
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
                 result = run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": runner})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_other_runner_values_are_rejected(self) -> None:
-        for runner in ("self-hosted", "private-linux", "ubuntu-22.04", "", "ubuntu-24.04; true"):
+        for runner in (
+            "self-hosted", "private-linux", "ubuntu-20.04", "ubuntu-22.04-gpu", "",
+            '["self-hosted", "linux"]', "${{ inputs.runner }}",
+            "ubuntu-24.04; touch runner-injection", "ubuntu-22.04$(touch runner-injection)",
+            "ubuntu-22.04\nself-hosted", " ubuntu-22.04",
+        ):
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
                 result = run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": runner})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("::error::check-runner", result.stdout)
+                self.assertFalse((Path(tmp) / "runner-injection").exists())
 
     def test_runner_allocation_uses_only_fixed_hosted_labels(self) -> None:
         workflow = (WORKFLOWS / "ci.yml").read_text()
         check = workflow.split("  check:\n", 1)[1].split("    steps:\n", 1)[0]
         selection = re.search(r"    runs-on: (.+)", check).group(1)
-        self.assertEqual(selection, "${{ inputs.check-runner == 'ubuntu-24.04' && 'ubuntu-24.04' || 'ubuntu-latest' }}")
+        self.assertEqual(selection, "${{ inputs.check-runner == 'ubuntu-24.04' && 'ubuntu-24.04' || inputs.check-runner == 'ubuntu-22.04' && 'ubuntu-22.04' || 'ubuntu-latest' }}")
+
+    def test_runner_validation_is_the_first_step(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text()
+        check = workflow.split("  check:\n", 1)[1]
+        steps = check.split("    steps:\n", 1)[1]
+        self.assertTrue(steps.lstrip().startswith("- name: Validate hosted check runner\n"))
 
 
 class ReleaseSignatureIdentityTest(unittest.TestCase):

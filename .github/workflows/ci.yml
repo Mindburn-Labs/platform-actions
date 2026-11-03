@@ -34,7 +34,7 @@ on:
   workflow_call:
     inputs:
       check-runner:
-        description: Hosted runner for make check; ubuntu-latest or ubuntu-24.04.
+        description: Hosted runner for make check; ubuntu-latest, ubuntu-24.04 or ubuntu-22.04.
         type: string
         default: ubuntu-latest
       check-timeout-minutes:
@@ -69,7 +69,7 @@ defaults:
 jobs:
   check:
     name: make check
-    runs-on: ${{ inputs.check-runner == 'ubuntu-24.04' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.check-runner == 'ubuntu-24.04' && 'ubuntu-24.04' || inputs.check-runner == 'ubuntu-22.04' && 'ubuntu-22.04' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.check-timeout-minutes }}
     steps:
       - name: Validate hosted check runner
@@ -77,8 +77,8 @@ jobs:
           CHECK_RUNNER: ${{ inputs.check-runner }}
         run: |
           case "${CHECK_RUNNER}" in
-            ubuntu-latest|ubuntu-24.04) ;;
-            *) echo "::error::check-runner must be ubuntu-latest or ubuntu-24.04"; exit 1 ;;
+            ubuntu-latest|ubuntu-24.04|ubuntu-22.04) ;;
+            *) echo "::error::check-runner must be ubuntu-latest, ubuntu-24.04 or ubuntu-22.04"; exit 1 ;;
           esac
 
       - name: Check out the repository
