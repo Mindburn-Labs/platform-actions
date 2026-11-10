@@ -23,10 +23,12 @@
 #         results: ${{ toJSON(needs) }}
 #
 # The gate passes only when a job named `check` and every other needed job
-# succeeded. Keep `if: always()` on the caller: GitHub reports a skipped
-# required check as passing, and with it a failed, skipped or cancelled lane
-# still reaches the gate and fails it. Name the ci.yml call `check`; its result
-# carries make check, the dependency scan and release readiness.
+# succeeded. Keep `if: always()` on the caller: without it GitHub skips this
+# job when a needed job fails, and a skipped job reports no failure. With it a
+# failed, skipped or cancelled lane still reaches the gate and fails it. Name
+# the ci.yml call `check`; its result carries make check, the dependency scan
+# and release readiness. Pin both facts in the caller's own tests: this
+# workflow sees only the results it is handed.
 name: CI v2 gate
 
 on:
@@ -53,7 +55,9 @@ jobs:
           RESULTS: ${{ inputs.results }}
         run: |
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${RESULTS}" || true
-          if ! jq -e 'type == "object" and has("check") and all(.[]; .result == "success")' <<<"${RESULTS}" >/dev/null; then
+          # --slurp: the input must be exactly one JSON document. Without it jq
+          # judges each document in turn and reports on the last.
+          if ! jq -e --slurp 'length == 1 and (.[0] | type == "object" and has("check") and all(.[]; .result == "success"))' <<<"${RESULTS}" >/dev/null; then
             echo "::error::ci / gate needs a successful job named check and success from every other needed job"
             exit 1
           fi
