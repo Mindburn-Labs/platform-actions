@@ -1268,6 +1268,19 @@ class LaneGateTest(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertNotEqual(self.gate(raw), 0)
 
+    def test_more_than_one_json_document_fails(self) -> None:
+        good = '{"check": {"result": "success"}}'
+        bad = '{"lane": {"result": "failure"}}'
+        for raw in (f"{bad} {good}", f"{bad}\n{good}", f"{good} {good}", f"{good} {bad}",
+                    '{"check": {"result": "failure"}, "check": {"result": "success"}} ' + good):
+            with self.subTest(raw=raw):
+                self.assertNotEqual(self.gate(raw), 0)
+
+    def test_duplicate_keys_resolve_as_github_would_emit_them(self) -> None:
+        # toJSON(needs) never repeats a key; if it did, jq keeps the last one,
+        # and a last result that is not success still fails.
+        self.assertNotEqual(self.gate('{"check": {"result": "success"}, "check": {"result": "failure"}}'), 0)
+
     def test_gate_job_reports_as_gate_and_holds_no_token_permission(self) -> None:
         workflow = (WORKFLOWS / "gate.yml").read_text()
         self.assertIn("\npermissions: {}\n", workflow)
@@ -1276,6 +1289,23 @@ class LaneGateTest(unittest.TestCase):
 
     def test_ci_workflow_gate_is_unchanged_by_lanes(self) -> None:
         self.assertNotIn("upstream", (WORKFLOWS / "ci.yml").read_text().lower())
+
+    def test_this_repository_gates_on_make_check_and_both_dry_runs(self) -> None:
+        # self-ci.yml is the worked example other callers copy, and its `ci`
+        # job is this repository's required check.
+        text = (WORKFLOWS / "self-ci.yml").read_text()
+        ci = text.split("\n  ci:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+        self.assertEqual([line.strip() for line in ci], [
+            "needs: [check, auto-tag-dry-run, release-image-dry-run]",
+            "if: always()",
+            "uses: ./.github/workflows/gate.yml",
+            "with:",
+            "results: ${{ toJSON(needs) }}",
+        ])
+        check = text.split("\n  check:\n", 1)[1].split("\n  auto-tag-dry-run:\n", 1)[0]
+        self.assertIn("    uses: ./.github/workflows/ci.yml\n", check)
+        self.assertNotIn("\n    if:", check)
+        self.assertNotIn("\n    needs:", check)
 
 
 class DetectToolchainsTest(unittest.TestCase):

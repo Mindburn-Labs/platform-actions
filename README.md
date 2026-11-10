@@ -145,10 +145,14 @@ jobs:
 ```
 
 `ci / gate` stays the one required check: it passes only when a job named
-`check` and every other needed job is `success`. Keep `if: always()`: GitHub
-reports a skipped required check as passing, and with it a failed, skipped or
-cancelled lane reaches the gate and fails it. The `check` call also reports
-`check / gate`; do not require it. Available from `v2.2.0`.
+`check` and every other needed job is `success`. Keep `if: always()`: without
+it GitHub skips the gate when a needed job fails, and a skipped job reports no
+failure; with it a failed, skipped or cancelled lane reaches the gate and fails
+it. The gate sees only the results it is handed, so pin the `ci` job's `needs`,
+`if` and `uses`, and the `check` job's `uses`, in the caller's own tests. The
+`check` call also reports `check / gate`; do not require it. Available from
+`v2.2.0`; from `v2.2.1` the gate also refuses input that is not exactly one
+JSON document.
 
 Jobs:
 
