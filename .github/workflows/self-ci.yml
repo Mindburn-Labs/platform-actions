@@ -16,13 +16,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  ci:
+  # `make check` in two shards (this Makefile ignores CHECK_SHARD, so each runs
+  # all of it) beside the dry runs; `ci` below gates on all of them.
+  check:
     permissions:
       contents: read
       actions: read
       pull-requests: read
     uses: ./.github/workflows/ci.yml
     with:
+      check-shards: 2
       setup-commands: |
         version=1.7.12
         sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -53,6 +56,18 @@ jobs:
         mkdir -p .release-context
         printf '%s %s\n' "${RELEASE_TAG}" "${SOURCE_SHA}" >.release-context/note.txt
       build-contexts: staged=.release-context
+
+  # `ci / gate`, the required check: make check and both dry runs succeeded.
+  ci:
+    needs: [check, auto-tag-dry-run, release-image-dry-run]
+    if: always()
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      upstream-results: ${{ toJSON(needs) }}
 
   # This repository's own Dependabot PRs, through the reusable workflow.
   dependabot:
