@@ -1,0 +1,59 @@
+# CI v2 gate: `ci / gate` for a caller whose required check also covers its
+# own lanes (a database lane, browser shards, an image build).
+#
+# Putting those lanes in `needs` of the job that calls ci.yml makes
+# `make check` wait for the slowest of them. Run them beside it instead, and
+# let this workflow be the required check:
+#
+#   jobs:
+#     check:                       # make check and the dependency scan
+#       permissions:
+#         contents: read
+#         actions: read
+#         pull-requests: read
+#       uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@<tag>
+#     database-lane:
+#       runs-on: ubuntu-latest
+#       steps: [...]
+#     ci:                          # reports `ci / gate`
+#       needs: [check, database-lane]
+#       if: always()
+#       uses: Mindburn-Labs/platform-actions/.github/workflows/gate.yml@<tag>
+#       with:
+#         results: ${{ toJSON(needs) }}
+#
+# The gate passes only when a job named `check` and every other needed job
+# succeeded. Keep `if: always()` on the caller: GitHub reports a skipped
+# required check as passing, and with it a failed, skipped or cancelled lane
+# still reaches the gate and fails it. Name the ci.yml call `check`; its result
+# carries make check, the dependency scan and release readiness.
+name: CI v2 gate
+
+on:
+  workflow_call:
+    inputs:
+      results:
+        description: "`toJSON(needs)` of the caller job."
+        type: string
+        required: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require success from every needed job
+        env:
+          RESULTS: ${{ inputs.results }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${RESULTS}" || true
+          if ! jq -e 'type == "object" and has("check") and all(.[]; .result == "success")' <<<"${RESULTS}" >/dev/null; then
+            echo "::error::ci / gate needs a successful job named check and success from every other needed job"
+            exit 1
+          fi

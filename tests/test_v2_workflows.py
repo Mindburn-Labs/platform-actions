@@ -1236,29 +1236,21 @@ class GateTest(unittest.TestCase):
         self.assertNotEqual(self.gate("", **{"check": "success", "dependency-scan": "skipped", "release-readiness": "skipped"}), 0)
 
 
-class UpstreamGateTest(unittest.TestCase):
-    """`upstream-results`: the gate for lanes that ran beside `make check`."""
+class LaneGateTest(unittest.TestCase):
+    """gate.yml: `ci / gate` for lanes that ran beside `make check`."""
 
-    SCRIPT = GateTest.SCRIPT
-    OWN_SKIPPED = {"check": "skipped", "dependency-scan": "skipped", "release-readiness": "skipped"}
+    SCRIPT = step_script("gate.yml", "Require success from every needed job")
 
-    def gate(self, upstream: object, own: dict[str, str] | None = None, event: str = "pull_request") -> int:
-        needs = {job: {"result": result, "outputs": {}} for job, result in (own or self.OWN_SKIPPED).items()}
-        raw = upstream if isinstance(upstream, str) else json.dumps(
-            {job: {"result": result, "outputs": {}} for job, result in upstream.items()}
+    def gate(self, results: object) -> int:
+        raw = results if isinstance(results, str) else json.dumps(
+            {job: {"result": result, "outputs": {}} for job, result in results.items()}
         )
         with tempfile.TemporaryDirectory() as tmp:
-            return run_bash(
-                self.SCRIPT,
-                Path(tmp),
-                {"NEEDS": json.dumps(needs), "UPSTREAM": raw, "EVENT_NAME": event,
-                 "REPOSITORY": "Mindburn-Labs/svc-helm-control-plane"},
-            ).returncode
+            return run_bash(self.SCRIPT, Path(tmp), {"RESULTS": raw}).returncode
 
-    def test_all_successful_lanes_pass_on_every_event(self) -> None:
-        for event in ("pull_request", "merge_group", "push"):
-            with self.subTest(event=event):
-                self.assertEqual(self.gate({"check": "success", "lane-a": "success", "lane-b": "success"}, event=event), 0)
+    def test_all_successful_lanes_pass(self) -> None:
+        self.assertEqual(self.gate({"check": "success"}), 0)
+        self.assertEqual(self.gate({"check": "success", "lane-a": "success", "lane-b": "success"}), 0)
 
     def test_any_lane_that_did_not_succeed_fails(self) -> None:
         for result in ("failure", "cancelled", "skipped", "unknown", ""):
@@ -1271,27 +1263,19 @@ class UpstreamGateTest(unittest.TestCase):
         self.assertNotEqual(self.gate({"lane-a": "success", "lane-b": "success"}), 0)
         self.assertNotEqual(self.gate({}), 0)
 
-    def test_malformed_upstream_results_fail(self) -> None:
-        for raw in ("not json", "[]", "null", "true", '"success"', '{"check": "success"}', '[{"result": "success"}]'):
+    def test_malformed_results_fail(self) -> None:
+        for raw in ("", "not json", "[]", "null", "true", '"success"', '{"check": "success"}', '[{"result": "success"}]'):
             with self.subTest(raw=raw):
                 self.assertNotEqual(self.gate(raw), 0)
 
-    def test_this_call_must_not_have_run_its_own_jobs(self) -> None:
-        for job in self.OWN_SKIPPED:
-            with self.subTest(job=job):
-                own = {**self.OWN_SKIPPED, job: "success"}
-                self.assertNotEqual(self.gate({"check": "success"}, own=own), 0)
+    def test_gate_job_reports_as_gate_and_holds_no_token_permission(self) -> None:
+        workflow = (WORKFLOWS / "gate.yml").read_text()
+        self.assertIn("\npermissions: {}\n", workflow)
+        self.assertIn("\njobs:\n  gate:\n    runs-on: ubuntu-latest\n", workflow)
+        self.assertIn("        required: true\n", workflow)
 
-    def test_own_jobs_are_skipped_only_when_upstream_results_are_given(self) -> None:
-        workflow = (WORKFLOWS / "ci.yml").read_text()
-        for job in ("check", "release-readiness", "dependency-scan"):
-            with self.subTest(job=job):
-                body = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
-                self.assertIn("inputs.upstream-results == ''", body)
-        self.assertIn("          UPSTREAM: ${{ inputs.upstream-results }}\n", workflow)
-
-    def test_without_upstream_results_skipped_own_jobs_still_fail(self) -> None:
-        self.assertNotEqual(self.gate("", own=self.OWN_SKIPPED), 0)
+    def test_ci_workflow_gate_is_unchanged_by_lanes(self) -> None:
+        self.assertNotIn("upstream", (WORKFLOWS / "ci.yml").read_text().lower())
 
 
 class DetectToolchainsTest(unittest.TestCase):
