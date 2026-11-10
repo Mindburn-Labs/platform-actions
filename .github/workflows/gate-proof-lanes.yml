@@ -1,0 +1,90 @@
+# Proof only, never merged: how gate.yml answers real job results.
+# Expected: `green / gate` success; every other `* / gate` failure.
+name: Gate proof (lanes)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      setup-commands: |
+        version=1.7.12
+        sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        archive="${RUNNER_TEMP}/actionlint.tar.gz"
+        curl --fail --silent --show-error --location --retry 3 --proto '=https' --output "${archive}" \
+          "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+        echo "${sha256}  ${archive}" | sha256sum --check --strict
+        mkdir -p "${RUNNER_TEMP}/bin"
+        tar -xzf "${archive}" -C "${RUNNER_TEMP}/bin" actionlint
+        echo "${RUNNER_TEMP}/bin" >>"${GITHUB_PATH}"
+
+  lane-ok:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  lane-fails:
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+
+  lane-skipped:
+    if: ${{ github.event_name == 'never' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never
+
+  lane-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - env:
+          PART: ${{ matrix.part }}
+        run: test "${PART}" != 2
+
+  green:
+    needs: [check, lane-ok]
+    if: always()
+    uses: ./.github/workflows/gate.yml
+    with:
+      results: ${{ toJSON(needs) }}
+
+  failed-lane:
+    needs: [check, lane-ok, lane-fails]
+    if: always()
+    uses: ./.github/workflows/gate.yml
+    with:
+      results: ${{ toJSON(needs) }}
+
+  skipped-lane:
+    needs: [check, lane-ok, lane-skipped]
+    if: always()
+    uses: ./.github/workflows/gate.yml
+    with:
+      results: ${{ toJSON(needs) }}
+
+  failed-matrix-entry:
+    needs: [check, lane-ok, lane-matrix]
+    if: always()
+    uses: ./.github/workflows/gate.yml
+    with:
+      results: ${{ toJSON(needs) }}
+
+  without-check:
+    needs: [lane-ok]
+    if: always()
+    uses: ./.github/workflows/gate.yml
+    with:
+      results: ${{ toJSON(needs) }}
