@@ -79,7 +79,7 @@ class HostedCheckRunnerTest(unittest.TestCase):
     def test_supported_hosted_runners_are_accepted(self) -> None:
         for runner in ("ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"):
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
-                result = run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": runner})
+                result = run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": runner, "CHECK_SHARDS": "1"})
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_other_runner_values_are_rejected(self) -> None:
@@ -90,7 +90,7 @@ class HostedCheckRunnerTest(unittest.TestCase):
             "ubuntu-22.04\nself-hosted", " ubuntu-22.04",
         ):
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
-                result = run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": runner})
+                result = run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": runner, "CHECK_SHARDS": "1"})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("::error::check-runner", result.stdout)
                 self.assertFalse((Path(tmp) / "runner-injection").exists())
@@ -106,6 +106,48 @@ class HostedCheckRunnerTest(unittest.TestCase):
         check = workflow.split("  check:\n", 1)[1]
         steps = check.split("    steps:\n", 1)[1]
         self.assertTrue(steps.lstrip().startswith("- name: Validate hosted check runner\n"))
+
+
+class CheckShardsTest(unittest.TestCase):
+    SCRIPT = step_script("ci.yml", "Validate hosted check runner")
+    WORKFLOW = (WORKFLOWS / "ci.yml").read_text()
+    CHECK = WORKFLOW.split("  check:\n", 1)[1].split("    steps:\n", 1)[0]
+
+    def validate(self, shards: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            return run_bash(self.SCRIPT, Path(tmp), {"CHECK_RUNNER": "ubuntu-latest", "CHECK_SHARDS": shards})
+
+    def test_one_to_eight_shards_are_accepted(self) -> None:
+        for shards in range(1, 9):
+            with self.subTest(shards=shards):
+                self.assertEqual(self.validate(str(shards)).returncode, 0)
+
+    def test_other_shard_counts_are_rejected(self) -> None:
+        for shards in ("0", "9", "-1", "2.5", "", "two", "4; touch x", "1\n9"):
+            with self.subTest(shards=shards):
+                result = self.validate(shards)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("::error::check-shards", result.stdout)
+
+    def test_matrix_lists_exactly_the_requested_shards(self) -> None:
+        matrix = re.search(r"        shard: \$\{\{ fromJSON\((.+)\) \}\}", self.CHECK).group(1)
+        branches = dict(re.findall(r"inputs\.check-shards == (\d) && '(\[[\d,]+\])'", matrix))
+        self.assertEqual(sorted(branches), [str(n) for n in range(2, 9)])
+        for count, listed in branches.items():
+            self.assertEqual(json.loads(listed), list(range(1, int(count) + 1)))
+        # One shard, and any count the first step rejects, is a single job.
+        self.assertTrue(matrix.endswith("|| '[1]'"))
+
+    def test_every_shard_reports_and_knows_its_part(self) -> None:
+        self.assertIn("      fail-fast: false\n", self.CHECK)
+        self.assertIn(
+            "      CHECK_SHARD: ${{ inputs.check-shards > 1 && format('{0}/{1}', matrix.shard, inputs.check-shards) || '' }}\n",
+            self.CHECK,
+        )
+
+    def test_gate_still_needs_the_whole_check_matrix(self) -> None:
+        gate = self.WORKFLOW.split("  gate:\n", 1)[1]
+        self.assertIn("    if: always()\n    needs: [check, dependency-scan, release-readiness]\n", gate)
 
 
 class ReleaseSignatureIdentityTest(unittest.TestCase):
@@ -1192,6 +1234,64 @@ class GateTest(unittest.TestCase):
 
     def test_missing_event_fails(self) -> None:
         self.assertNotEqual(self.gate("", **{"check": "success", "dependency-scan": "skipped", "release-readiness": "skipped"}), 0)
+
+
+class UpstreamGateTest(unittest.TestCase):
+    """`upstream-results`: the gate for lanes that ran beside `make check`."""
+
+    SCRIPT = GateTest.SCRIPT
+    OWN_SKIPPED = {"check": "skipped", "dependency-scan": "skipped", "release-readiness": "skipped"}
+
+    def gate(self, upstream: object, own: dict[str, str] | None = None, event: str = "pull_request") -> int:
+        needs = {job: {"result": result, "outputs": {}} for job, result in (own or self.OWN_SKIPPED).items()}
+        raw = upstream if isinstance(upstream, str) else json.dumps(
+            {job: {"result": result, "outputs": {}} for job, result in upstream.items()}
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            return run_bash(
+                self.SCRIPT,
+                Path(tmp),
+                {"NEEDS": json.dumps(needs), "UPSTREAM": raw, "EVENT_NAME": event,
+                 "REPOSITORY": "Mindburn-Labs/svc-helm-control-plane"},
+            ).returncode
+
+    def test_all_successful_lanes_pass_on_every_event(self) -> None:
+        for event in ("pull_request", "merge_group", "push"):
+            with self.subTest(event=event):
+                self.assertEqual(self.gate({"check": "success", "lane-a": "success", "lane-b": "success"}, event=event), 0)
+
+    def test_any_lane_that_did_not_succeed_fails(self) -> None:
+        for result in ("failure", "cancelled", "skipped", "unknown", ""):
+            for failing in ("check", "lane-a"):
+                with self.subTest(result=result, failing=failing):
+                    lanes = {"check": "success", "lane-a": "success", "lane-b": "success", failing: result}
+                    self.assertNotEqual(self.gate(lanes), 0)
+
+    def test_a_check_job_is_required(self) -> None:
+        self.assertNotEqual(self.gate({"lane-a": "success", "lane-b": "success"}), 0)
+        self.assertNotEqual(self.gate({}), 0)
+
+    def test_malformed_upstream_results_fail(self) -> None:
+        for raw in ("not json", "[]", "null", "true", '"success"', '{"check": "success"}', '[{"result": "success"}]'):
+            with self.subTest(raw=raw):
+                self.assertNotEqual(self.gate(raw), 0)
+
+    def test_this_call_must_not_have_run_its_own_jobs(self) -> None:
+        for job in self.OWN_SKIPPED:
+            with self.subTest(job=job):
+                own = {**self.OWN_SKIPPED, job: "success"}
+                self.assertNotEqual(self.gate({"check": "success"}, own=own), 0)
+
+    def test_own_jobs_are_skipped_only_when_upstream_results_are_given(self) -> None:
+        workflow = (WORKFLOWS / "ci.yml").read_text()
+        for job in ("check", "release-readiness", "dependency-scan"):
+            with self.subTest(job=job):
+                body = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
+                self.assertIn("inputs.upstream-results == ''", body)
+        self.assertIn("          UPSTREAM: ${{ inputs.upstream-results }}\n", workflow)
+
+    def test_without_upstream_results_skipped_own_jobs_still_fail(self) -> None:
+        self.assertNotEqual(self.gate("", own=self.OWN_SKIPPED), 0)
 
 
 class DetectToolchainsTest(unittest.TestCase):
