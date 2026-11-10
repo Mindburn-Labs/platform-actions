@@ -61,13 +61,9 @@ jobs:
   ci:
     needs: [check, auto-tag-dry-run, release-image-dry-run]
     if: always()
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/gate.yml
     with:
-      upstream-results: ${{ toJSON(needs) }}
+      results: ${{ toJSON(needs) }}
 
   # This repository's own Dependabot PRs, through the reusable workflow.
   dependabot:

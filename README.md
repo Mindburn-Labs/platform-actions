@@ -119,15 +119,14 @@ raise the caller's token permissions.
 | `setup-commands` | `''` | Shell run after toolchain setup, before `make check` (for example `npm ci`). |
 | `extra-commands` | `''` | Shell run after `make check`, in the same job. |
 | `check-shards` | `1` | Number of parallel `make check` jobs, 1 to 8. Each job exports `CHECK_SHARD=<i>/<N>` to the setup commands, `make check` and the extra commands, and the repository's Makefile runs its i-th part. `gate` needs every shard. A Makefile that ignores `CHECK_SHARD` runs the whole gate N times, so nothing is dropped by default. Available from `v2.2.0`. |
-| `upstream-results` | `''` | `toJSON(needs)` of the caller job. When set, this call runs `gate` alone, and it passes only when a job named `check` and every other needed job is `success`. See "Lanes beside `make check`". Available from `v2.2.0`. |
 | secret `MINDBURN_ORG_READ_TOKEN` | none | Reads sibling Go repositories when needed. GitOps promotion readiness also needs read access to `helm-rollout-evidence` and the named producer Actions runs/artifacts. |
 
-#### Lanes beside `make check`
+#### Lanes beside `make check`: `gate.yml`
 
 A caller whose required gate also covers its own jobs (a database lane, browser
 shards, an image build) used to put them in `needs` of the `ci` job, which
-makes `make check` wait for the slowest of them. Call the workflow twice
-instead: once for `make check`, once for the gate.
+makes `make check` wait for the slowest of them. Run them beside it, and call
+`gate.yml` for the required check:
 
 ```yaml
 jobs:
@@ -140,16 +139,16 @@ jobs:
   ci:
     needs: [check, database-lane]
     if: always()
-    permissions: {contents: read, actions: read, pull-requests: read}
-    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2.2.0
+    uses: Mindburn-Labs/platform-actions/.github/workflows/gate.yml@v2.2.0
     with:
-      upstream-results: ${{ toJSON(needs) }}
+      results: ${{ toJSON(needs) }}
 ```
 
-`ci / gate` stays the one required check. Keep `if: always()`: GitHub reports a
-skipped required check as passing, and with it a failed, skipped or cancelled
-lane reaches the gate and fails it. The first call also reports `check / gate`;
-do not require it.
+`ci / gate` stays the one required check: it passes only when a job named
+`check` and every other needed job is `success`. Keep `if: always()`: GitHub
+reports a skipped required check as passing, and with it a failed, skipped or
+cancelled lane reaches the gate and fails it. The `check` call also reports
+`check / gate`; do not require it. Available from `v2.2.0`.
 
 Jobs:
 

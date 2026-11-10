@@ -26,28 +26,15 @@
 #   gate            needs every other job; only dependency-scan may skip, on
 #                   events other than pull_request and merge_group.
 #
-# Two inputs keep a long gate short without dropping a check:
+# One input keeps a long `make check` short without dropping a check:
 #
 #   check-shards: N       runs `make check` in N parallel jobs. Each gets
 #                         CHECK_SHARD=<i>/<N> and the repository's `make check`
 #                         runs its i-th part; `gate` needs all N. A Makefile
 #                         that ignores CHECK_SHARD runs the whole gate N times.
 #
-#   upstream-results      lets other lanes run beside `make check` instead of
-#                         before it. Call this workflow twice:
-#
-#     check:                         # make check and the dependency scan
-#       uses: .../ci.yml@<tag>
-#     ci:                            # `ci / gate`, the required check
-#       needs: [check, lane-a, lane-b]
-#       if: always()
-#       uses: .../ci.yml@<tag>
-#       with:
-#         upstream-results: ${{ toJSON(needs) }}
-#
-#                         The second call runs `gate` alone: it passes only
-#                         when a job named `check` and every other needed job
-#                         succeeded. A skipped or cancelled lane fails it.
+# A caller whose gate also covers its own lanes runs them beside `make check`
+# and calls gate.yml for `ci / gate`; see that file.
 #
 # Scripts are inline on purpose: a reusable workflow checks out the CALLER, so
 # it cannot read helper files from this repository.
@@ -79,12 +66,6 @@ on:
           commands; the repository's Makefile decides what each part runs.
         type: number
         default: 1
-      upstream-results:
-        description: >-
-          `toJSON(needs)` of the caller job. When set, only `gate` runs: it
-          requires a `check` entry and every entry to be `success`.
-        type: string
-        default: ''
     secrets:
       MINDBURN_ORG_READ_TOKEN:
         description: >-
@@ -105,7 +86,6 @@ defaults:
 jobs:
   check:
     name: ${{ inputs.check-shards > 1 && format('make check ({0}/{1})', matrix.shard, inputs.check-shards) || 'make check' }}
-    if: inputs.upstream-results == ''
     runs-on: ${{ inputs.check-runner == 'ubuntu-24.04' && 'ubuntu-24.04' || inputs.check-runner == 'ubuntu-22.04' && 'ubuntu-22.04' || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.check-timeout-minutes }}
     strategy:
@@ -354,7 +334,6 @@ jobs:
   release-readiness:
     name: release readiness
     if: >-
-      inputs.upstream-results == '' &&
       github.repository == 'Mindburn-Labs/gitops-platform' &&
       (github.event_name == 'merge_group' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
@@ -725,7 +704,7 @@ jobs:
 
   dependency-scan:
     name: dependency scan
-    if: inputs.upstream-results == '' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -814,26 +793,10 @@ jobs:
       - name: Require success with explicit skip policy
         env:
           NEEDS: ${{ toJSON(needs) }}
-          UPSTREAM: ${{ inputs.upstream-results }}
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
           : "${EVENT_NAME:?GitHub event is required for the skip policy}"
-          if [[ -n "${UPSTREAM}" ]]; then
-            # Gate for lanes that ran beside `make check`. The caller's `check`
-            # job is the other call of this workflow, so its result already
-            # carries make check, the dependency scan and release readiness.
-            jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${UPSTREAM}" || true
-            if ! jq -e 'all(.[]; .result == "skipped")' <<<"${NEEDS}" >/dev/null; then
-              echo "::error::upstream-results is set, so this call must run no job of its own"
-              exit 1
-            fi
-            if ! jq -e 'type == "object" and has("check") and all(.[]; .result == "success")' <<<"${UPSTREAM}" >/dev/null; then
-              echo "::error::ci / gate needs a successful job named check and success from every other needed job"
-              exit 1
-            fi
-            exit 0
-          fi
           jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"${NEEDS}"
           jq -e --arg event "${EVENT_NAME}" --arg repo "${REPOSITORY}" '
             def readiness_required:
