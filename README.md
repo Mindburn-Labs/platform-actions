@@ -1,13 +1,7 @@
 # platform-actions
 
-> [!NOTE]
-> **Ecosystem boundary**: This repository is a **Non-HELM** system. It carries no HELM cryptographic verification core and makes no governance or receipt claims. It hosts reusable CI plumbing for the Mindburn Labs polyrepo estate.
-
-Reusable GitHub Actions workflows shared across Mindburn Labs repositories.
-Every repository calls them through `workflow_call`, so CI and release logic
-lives in one place. The design is `docs/architecture/agent-delivery.md` in the
-`docs` repository: agents build, merge, release and deploy, and automated
-checks are the only thing that stops a change.
+Reusable GitHub Actions workflows for Mindburn Labs repositories. Use them to
+run a repository’s `make check`, gate merges, tag releases, and publish images.
 
 ## The v2 contract
 
@@ -18,24 +12,19 @@ authenticated GitHub reads. Do not interpolate `github.token` into the caller's
 not persist Git credentials; a subsequent private Git fetch uses a command-local
 credential helper.
 
-Every repository:
+### Set up a caller
 
-1. has a `make check` target that runs its real gates (lint, typecheck, tests,
-   build; for docs or config repos, whatever validates them). A target that
-   only echoes is a defect.
-2. copies [`templates/ci.yml`](templates/ci.yml) to `.github/workflows/ci.yml`.
-   It calls `ci.yml@v2.0.4` on `pull_request`, `push` to the default branch and
-   `merge_group`, with no path filters.
-3. requires one status check, `ci / gate` (the caller job id is `ci`, the
+1. Add a `make check` target that runs the checks appropriate to the repository,
+   such as lint, type checking, tests, or a build.
+2. Copy [`templates/ci.yml`](templates/ci.yml) to `.github/workflows/ci.yml`.
+   Pin a compatible full-version release for each workflow. Run CI on
+   `pull_request`, default-branch `push`, and `merge_group` with no path filters.
+3. Require one status check, `ci / gate` (the caller job id is `ci`, the
    reusable job is `gate`), through the org ruleset.
-4. copies [`templates/dependabot.yml`](templates/dependabot.yml) to
-   `.github/dependabot.yml` and keeps the blocks for ecosystems it has, and
-   copies [`templates/dependabot-auto-merge.yml`](templates/dependabot-auto-merge.yml)
-   to `.github/workflows/` so patch and minor updates merge themselves on a
-   green `ci / gate`.
-5. pins a protected full-version tag, currently `@v2.0.4`. Existing `@v2`
-   callers migrate through reviewed PRs. New compatible versions receive a
-   new `v2.x.y` tag; a breaking contract change receives a new major version.
+4. Copy [`templates/dependabot.yml`](templates/dependabot.yml) to
+   `.github/dependabot.yml` and keep the applicable ecosystems. Copy
+   [`templates/dependabot-auto-merge.yml`](templates/dependabot-auto-merge.yml)
+   into `.github/workflows/` to merge patch and minor updates after `ci / gate` passes.
 
 ```yaml
 jobs:
@@ -132,14 +121,14 @@ makes `make check` wait for the slowest of them. Run them beside it, and call
 jobs:
   check:
     permissions: {contents: read, actions: read, pull-requests: read}
-    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2.2.0
+    uses: Mindburn-Labs/platform-actions/.github/workflows/ci.yml@v2.2.1
   database-lane:
     runs-on: ubuntu-latest
     steps: [...]
   ci:
     needs: [check, database-lane]
     if: always()
-    uses: Mindburn-Labs/platform-actions/.github/workflows/gate.yml@v2.2.0
+    uses: Mindburn-Labs/platform-actions/.github/workflows/gate.yml@v2.2.1
     with:
       results: ${{ toJSON(needs) }}
 ```
@@ -248,20 +237,8 @@ auto-merge".
 of `ci.yml@v2.0.4`. They keep working for repositories that still call them
 until those callers migrate. `production-readiness.yml` has no known callers.
 
-## Repository layout
-
-```text
-.
-├── .github/workflows/
-│   ├── ci.yml, auto-tag.yml, release-image.yml,  # v2 reusable workflows
-│   │   dependabot-auto-merge.yml
-│   ├── self-ci.yml                                # this repo's CI: calls the four above
-│   └── agent-preflight.yml, doc-fingerprint-guard.yml, production-readiness.yml
-├── templates/           # caller ci.yml, dependabot.yml and dependabot-auto-merge.yml
-├── tests/               # unit tests for the inline workflow scripts
-├── agent.yaml           # agent contract checked by agent-preflight.yml
-└── Makefile             # check = lint + test
-```
+See the [release runbook](docs/runbook.md) to publish a workflow version or
+recover a caller.
 
 ## Local commands
 

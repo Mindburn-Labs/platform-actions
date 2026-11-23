@@ -1,22 +1,29 @@
-# Runbook: platform-actions
+# Release and recover reusable workflows
 
-This repository ships reusable workflows and runs no service. Callers pin the
-moving `v2` tag, so a release is a move of `v2` (see `AGENTS.md`).
+Use an immutable full-version tag for each compatible workflow release. Release
+breaking workflow contract changes under a new major version and migrate
+callers explicitly.
 
-## Release Verification
-Before `v2` moves, `self-ci.yml` runs the changed workflows on the pull
-request: `ci.yml` (`make check`), a dry run of `auto-tag.yml` and a dry-run
-multi-arch build of `release-image.yml`. After moving `v2`, confirm the remote
-tag points at the merge commit:
+## Release
 
-```bash
-git ls-remote --tags origin v2   # the v2^{} line is the commit callers run
+1. Merge after `self-ci.yml` passes `make check`, the auto-tag dry run,
+   and the multi-platform image build dry run.
+2. Create a new annotated `v2.x.y` tag at the verified merge commit and
+   push that tag.
+3. Read back the tag object and peeled commit. Confirm the peeled commit
+   is the verified merge commit before changing callers.
+
+```sh
+tag=v2.x.y
+git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}"
 ```
 
-## Recovery Procedures
-If a `v2` move breaks callers, move `v2` back to the last good commit, then fix
-forward on `main`:
+The `^{}` ref gives the commit the annotated tag points to. Update callers
+through pull requests pinned to the new full-version tag.
 
-```bash
-git tag -fa v2 -m "v2: back to <sha>" <sha> && git push -f origin refs/tags/v2
-```
+## Recover a caller
+
+Restore the caller’s last known good immutable workflow tag through a pull
+request and run its required `ci / gate`. Leave published tags in place,
+including `v2`. Ship the fix as a new version and verify the affected callers
+before they adopt it.
