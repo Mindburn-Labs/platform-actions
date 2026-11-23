@@ -237,6 +237,14 @@ auto-merge".
 of `ci.yml@v2.0.4`. They keep working for repositories that still call them
 until those callers migrate. `production-readiness.yml` has no known callers.
 
+Before migrating from `agent-preflight.yml`, review local Go module replacements.
+The legacy workflow scans up to three directory levels and treats the first path
+segment after `../` in a line-form replacement as a sibling repository. `ci.yml`
+reads tracked `go.mod` files and resolves each replacement from its module's
+directory. A nested module can therefore use `../local-dep` inside the checkout
+with `ci.yml`. Keep `MINDBURN_ORG_READ_TOKEN` in the caller's secrets if an
+external sibling is required and vendored dependencies do not satisfy the build.
+
 See the [release runbook](docs/runbook.md) to publish a workflow version or
 recover a caller.
 
