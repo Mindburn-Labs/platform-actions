@@ -5,6 +5,9 @@
 - **Issue:** HELM-216
 - **Supersedes:** the inline-validator fix from PR #8 (necessary, but not sufficient)
 
+This ADR records the move from private to internal visibility. The repository
+is now public. See the [current caller instructions](../../README.md#set-up-a-caller).
+
 > **Filename note.** This file is named `…-public-mirror` because it began life
 > as the ADR for a public-mirror decision, and the docs-truth ledger row was
 > already merged against that path. The mirror was **rejected**; the path is kept
